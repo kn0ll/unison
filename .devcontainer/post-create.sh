@@ -32,6 +32,11 @@ curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
 # Source GHCup environment
 source "$HOME/.ghcup/env"
 
+# Ensure GHCup env is sourced in future shell sessions
+if ! grep -q 'ghcup/env' "$HOME/.bashrc" 2>/dev/null; then
+    echo '[ -f "$HOME/.ghcup/env" ] && source "$HOME/.ghcup/env"' >> "$HOME/.bashrc"
+fi
+
 # Install specific Stack version
 echo "Installing Stack 2.15.7..."
 ghcup install stack 2.15.7
