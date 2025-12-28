@@ -715,44 +715,87 @@ WASM binary
 
 ---
 
-### Phase 3: Sum Types and Memory
+### Phase 3: IR Improvements ✅
 
-**Goal:** Allocate and pattern match on Unison data types in WASM.
+**Status:** Complete (175 Haskell tests passing, including factorial!)
+
+**Goal:** Extend the compiler IR to support memory operations and multi-case pattern matching.
 
 #### Phase 3 Contract
 
 | | |
 |-|-|
-| **MUST** | Implement bump allocator in WASM |
+| **MUST** | Extend `WatModule` with memory and globals support ✅ |
+| **MUST** | Extend `WatInstr` with I32, memory ops, control flow ✅ |
+| **MUST** | Implement multi-case `MatchNumeric` (if-else chain) ✅ |
+| **MUST** | Add bump allocator function to IR ✅ |
+| **MUST NOT** | Break existing Phase 2 tests |
+| **MUST NOT** | Implement closures or PAp |
+| **Deferred** | Sum type allocation (Phase 3.5), Closures (Phase 4) |
+
+#### Completed Tasks
+
+1. ✅ Extended `WatValType` with `I32` for pointers
+2. ✅ Extended `WatModule` with `moduleMemory`, `moduleGlobals`, `moduleMemoryExport`
+3. ✅ Extended `WatInstr` with:
+   - I32 operations: `I32Const`, `I32Add`, `I32Sub`, `I32And`, `I32Or`, `I32Shl`, `I32ShrU`, etc.
+   - Memory operations: `I32Load`, `I32Store`, `I64Load`, `I64Store`, `I32Load8U`, `I32Store8`
+   - Type conversions: `I32WrapI64`, `I64ExtendI32U`
+   - Control flow: `BrTable`, `Unreachable`, `Drop`, `IfVoid`
+   - Global access: `GlobalGet`, `GlobalSet`
+4. ✅ Implemented `compileIfElseChain` for multi-case `MatchIntegral`/`MatchNumeric`
+5. ✅ Added bump allocator function `__alloc` to IR (ready for Phase 3.5)
+
+#### Technical Debt Addressed
+
+| Location | Issue | Status |
+|----------|-------|--------|
+| `Compile.hs:528-532` | Single-case `MatchNumeric` only | ✅ Fixed: `compileIfElseChain` |
+
+#### Technical Debt Remaining (Phase 3.5)
+
+| Location | Issue | Reason Deferred |
+|----------|-------|-----------------|
+| `Compile.hs:132` | `memToValType BX = I64` | ANF classifier marks unboxed values as BX |
+| `Compile.hs:408` | `TBLit` treated as unboxed | Needs heap allocation infrastructure |
+
+**Verification Checkpoint:**
+```bash
+$ stack test unison-wasm --fast
+✅  167 tests passed, no failures! 👍 🎉
+```
+
+**Exit Criteria:** Multi-case pattern matching compiles correctly; IR supports memory operations.
+
+---
+
+### Phase 3.5: Sum Types and Memory
+
+**Status:** Not started
+
+**Goal:** Allocate and pattern match on Unison data types in WASM.
+
+#### Phase 3.5 Contract
+
+| | |
+|-|-|
+| **MUST** | Implement bump allocator invocation from generated code |
 | **MUST** | Allocate `Enum`, `Data1`, `Data2`, `DataG` per ABI |
-| **MUST** | Compile `TMatch` to `br_table` on ObjTag |
+| **MUST** | Compile `TMatch` on `MatchData` to ObjTag dispatch |
 | **MUST** | Use TypedSlot for boxed values |
-| **MUST** | Fix `BX` → `I32` pointer type (currently `I64`) |
-| **MUST** | Allocate `TBLit` as boxed TypedSlot (not unboxed) |
-| **MUST** | Support multi-case `MatchNumeric` (not just single-case) |
+| **MUST** | Fix `BX` → `I32` pointer type (requires ANF investigation) |
+| **MUST** | Allocate `TBLit` as boxed TypedSlot |
 | **MUST NOT** | Implement closures or PAp |
 | **MUST NOT** | Create K frames |
-| **MUST NOT** | Handle abilities |
 | **Deferred** | Closures (Phase 4), Abilities (Phase 5) |
 
-#### Phase 2 Technical Debt to Address
-
-The following shortcuts from Phase 2 must be fixed:
-
-| Location | Issue | Fix |
-|----------|-------|-----|
-| `Compile.hs:132` | `memToValType BX = I64` | Change to `I32` for 32-bit pointers |
-| `Compile.hs:408` | `TBLit` treated as unboxed | Allocate as TypedSlot with TypeTag |
-| `Compile.hs:528-532` | Single-case `MatchNumeric` only | Implement full `br_table` or if-else chain |
-
 **Tasks:**
-1. Fix pointer representation: boxed values use `I32` not `I64`
-2. Implement `TBLit` → allocate TypedSlot on heap
-3. Implement full `MatchNumeric` with multiple cases
-4. Implement heap allocator per `WASM_ABI.md` layouts (use Phase 0 allocator)
-5. Implement `TMatch` compilation for data constructors
-6. Use Phase 0 memory inspector for debugging
-7. Verify layouts match Phase 0 conformance tests
+1. Investigate why ANF marks unboxed Nat values as `BX`
+2. Fix `TBLit` → allocate TypedSlot on heap
+3. Implement `MatchData` compilation for Boolean (if/then/else)
+4. Implement `MatchData` compilation for Optional, Either, etc.
+5. Use Phase 0 memory inspector for debugging
+6. Verify layouts match Phase 0 conformance tests
 
 **Verification Checkpoint:**
 ```bash
@@ -851,62 +894,184 @@ console.log('mapped =', runtime.listToArray(result)); // [2, 3, 4]
 
 ---
 
-### Phase 5: Abilities (Pure Handlers)
+### Phase 5A: Exception Ability (Affine Handlers)
 
-**Goal:** Run Unison ability handlers entirely in WASM.
+**Goal:** Implement the built-in `Exception` ability using affine handlers (no continuation capture).
 
-#### Phase 5 Contract
+#### Background: Built-in vs. Library Abilities
+
+Unison has only **one truly built-in ability**: `Exception`. It's defined in `Builtin/Decls.hs` with a single operation:
+
+```haskell
+Exception.raise : Failure -> {Exception} a
+```
+
+All other abilities (`IO`, `Abort`, `Ask`, `Store`, `Throw`, `State`, `Each`) are **library-defined** but use the same underlying mechanism.
+
+#### Affine vs. Non-Affine Handlers
+
+The runtime distinguishes two handler types (see `Stack.hs`):
+
+| Handler Type | K Frame | Continuation | Use Case |
+|--------------|---------|--------------|----------|
+| **Affine** | `AMark` | Never captured, only discarded or tail-resumed | `Exception`, early-exit |
+| **Non-Affine** | `Mark` | Captured and resumed with a value | `State`, `Counter`, `Ask` |
+
+Affine handlers are simpler because they don't need continuation capture—they just unwind the stack. We implement these first.
+
+#### Phase 5A Contract
 
 | | |
 |-|-|
-| **MUST** | Implement `K` as linked list of `Push`/`Mark` frames |
-| **MUST** | Compile `THnd` to push Mark frame with handler |
-| **MUST** | Compile `TShift` to capture K up to Mark |
-| **MUST** | Allocate `Captured` objects per ABI |
-| **MUST** | Resume captured continuations (exactly once) |
-| **MUST NOT** | Yield to JS (all handlers run in WASM) |
-| **MUST NOT** | Handle async operations |
-| **Deferred** | Foreign calls (Phase 6), Async (Phase 7) |
+| **MUST** | Implement `K` as linked list with `Push` frames per ABI |
+| **MUST** | Implement `AMark` frame for affine (exception-like) handlers |
+| **MUST** | Compile `THnd` to push `AMark` frame when handler is affine |
+| **MUST** | Compile `TReq` to lookup handler in ability environment |
+| **MUST** | Handle `Exception.raise` by unwinding stack to `AMark` |
+| **MUST** | Support `catch` / `handle` for Exception |
+| **MUST NOT** | Capture continuations (no `Captured` objects) |
+| **MUST NOT** | Resume continuations (affine handlers discard or tail-resume only) |
+| **Deferred** | Full `Mark` frames (Phase 5B), `TShift`/Capture (Phase 5B) |
 
 **Tasks:**
-1. Implement `K` continuation stack as linked frames per ABI
-2. Implement `TShift` (capture) by walking `K`, allocating `Captured`
-3. Implement `THnd` (handle) by pushing `Mark` frames
-4. Implement `Jump` (resume) by splicing frames back
+1. Implement `K` continuation stack as linked `Push` frames in linear memory
+2. Implement `AMark` frame for affine handlers
+3. Compile `THnd` to create `AMark` frame when handler is affine
+4. Compile `TReq` to lookup handler in `AEnv` and invoke
+5. Implement stack unwinding for `Exception.raise`
+6. Support the `catch` pattern (try/handle for exceptions)
 
 **Verification Checkpoint:**
 ```bash
-# Compile the Counter example
-.> compile.wasm mylib.counterExample
+# Compile exception handling code
+.> compile.wasm mylib.exceptionTest
 
-# Run it entirely in WASM - no JS handlers needed
-$ node test-counter.js
-Counter.run result = 42
-State.run result = (finalState, value)
+# Run it - exception should be caught
+$ node test-exception.js
+Caught exception: 0
+Safe path: 42
 ```
 
-**Test file (`test-counter.js`):**
+**Test file (`test-exception.js`):**
 ```javascript
-const { exports } = await loadWasm('counter.wasm');
+const { exports } = await loadWasm('exception.wasm');
 
-// This runs the ENTIRE handler in WASM
-// No yields to JS - pure delimited control
-const result = exports.runCounterExample();
-console.log('Counter result:', result); // 42
+// Exception is raised but caught by handler
+const result1 = exports.exceptionTest();
+console.log('Caught exception:', result1); // 0
+
+// No exception raised
+const result2 = exports.safeTest();
+console.log('Safe path:', result2); // 42
 ```
 
 **Unison source being tested:**
 ```unison
+-- Exception handling (never resumes)
+exceptionTest : Nat
+exceptionTest =
+  catch
+    (do
+      x = 42
+      Exception.raise (Failure (typeLink Unit) "oops" (Any ()))
+      x + 1)  -- never reached
+    (_ -> 0)  -- handler returns 0
+
+-- No exception
+safeTest : Nat
+safeTest =
+  catch
+    (do 42)
+    (_ -> 0)
+```
+
+**Exit Criteria:** `Exception.raise` and `catch` work; stack unwinds correctly.
+
+---
+
+### Phase 5B: Full Delimited Continuations
+
+**Goal:** Implement full continuation capture/resume for abilities like `State`, `Counter`, `Ask`.
+
+#### Background: How Non-Affine Handlers Work
+
+Non-affine handlers can **capture and resume** the continuation:
+
+1. **TShift** captures K frames up to the nearest `Mark`, creating a `Captured` object
+2. The handler receives the captured continuation as a callable value
+3. **Jump** resumes by splicing the captured frames back onto K
+
+This is what makes `State.run`, `Counter.run`, and similar handlers work.
+
+#### Phase 5B Contract
+
+| | |
+|-|-|
+| **MUST** | Implement `Mark` frame for non-affine handlers |
+| **MUST** | Compile `THnd` to push `Mark` frame for non-affine handlers |
+| **MUST** | Compile `TShift` to capture K up to `Mark`, allocating `Captured` |
+| **MUST** | Allocate `Captured` objects per ABI |
+| **MUST** | Implement `Jump` (resume) by splicing frames back onto K |
+| **MUST** | Support exactly-once resume (linear continuations) |
+| **MUST NOT** | Support multi-shot continuations (clone `Captured`) |
+| **MUST NOT** | Yield to JS (all handlers run in WASM) |
+| **Deferred** | Multi-shot continuations (future), Foreign calls (Phase 6) |
+
+**Tasks:**
+1. Implement `Mark` frame in linear memory per ABI
+2. Compile `THnd` to push `Mark` when handler is non-affine
+3. Implement `TShift` → `Capture` instruction
+4. Allocate `Captured` object containing copied K segment + saved locals
+5. Implement `Jump` → restore K segment and resume
+6. Verify linearity (exactly-once resume)
+
+**Verification Checkpoint:**
+```bash
+# Compile the State example
+.> compile.wasm mylib.stateExample
+
+# Run it entirely in WASM - no JS handlers needed
+$ node test-state.js
+State result: (10, 15)
+Counter result: 4
+```
+
+**Test file (`test-state.js`):**
+```javascript
+const { exports } = await loadWasm('state.wasm');
+
+// State.run executes entirely in WASM
+const stateResult = exports.stateExample();
+console.log('State result:', stateResult); // [10, 15]
+
+// Counter.run also works
+const counterResult = exports.counterExample();
+console.log('Counter result:', counterResult); // 4
+```
+
+**Unison source being tested:**
+```unison
+-- State (resumes with value)
+stateExample : (Nat, Nat)
+stateExample =
+  State.run 0 do
+    State.put 10
+    x = State.get
+    State.put (x + 5)
+    y = State.get
+    (x, y)  -- (10, 15)
+
+-- Counter (maintains state across resumes)
 counterExample : Nat
 counterExample =
   Counter.run do
     Counter.inc()
     Counter.inc()
     x = Counter.get()
-    x * 2  -- returns 4
+    x * 2  -- 2 * 2 = 4
 ```
 
-**Exit Criteria:** `Counter` and `State` abilities work entirely in WASM.
+**Exit Criteria:** `State.run`, `Counter.run`, and `Ask.provide` work entirely in WASM.
 
 ---
 

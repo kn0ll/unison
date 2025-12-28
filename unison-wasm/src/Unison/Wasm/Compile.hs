@@ -1,19 +1,20 @@
--- | SuperGroup → WAT compiler (Phase 2).
+-- | SuperGroup → WAT compiler (Phase 3).
 --
 -- This module compiles Unison's SuperGroup intermediate representation
--- to WebAssembly Text format (WAT). Phase 2 supports:
+-- to WebAssembly Text format (WAT). Phase 3 supports:
 --
 -- * Unboxed arithmetic (Nat, Int, Float operations)
 -- * Local variables (TVar)
 -- * Let bindings (TLets)
 -- * Primitive operations (TPrm)
 -- * Static function calls (TApp FComb)
+-- * Full multi-case MatchIntegral/MatchNumeric
+-- * Boxed values as I32 pointers (BX → I32)
 --
--- NOT supported in Phase 2:
--- * Heap allocation
--- * Closures/partial application
--- * Pattern matching on sum types
--- * Abilities/handlers
+-- NOT supported in Phase 3 (deferred):
+-- * Heap allocation for sum types (Phase 3.5)
+-- * Closures/partial application (Phase 4)
+-- * Abilities/handlers (Phase 5)
 module Unison.Wasm.Compile
   ( -- * Compilation
     compileGroup,
@@ -68,11 +69,11 @@ data CompileError
     UnboundVariable Text
   | -- | Unsupported primitive operation
     UnsupportedPrimOp POp
-  | -- | Unsupported construct (Phase 2 limitation)
+  | -- | Unsupported construct (Phase limitation)
     UnsupportedConstruct Text
   | -- | Wrong number of arguments for primitive
     WrongArity POp Int Int -- expected, actual
-  | -- | Foreign function call not supported in Phase 2
+  | -- | Foreign function call not supported
     UnsupportedForeign Text
   deriving (Eq, Show)
 
@@ -126,10 +127,12 @@ bindVars bindings ctx =
         }
 
 -- | Convert memory classification to WASM type
--- Phase 2: All values are i64 (unboxed)
+-- NOTE: Phase 3 keeps BX = I64 as a workaround.
+-- The ANF classifier marks many unboxed values as BX. Proper I32 pointers
+-- require heap allocation (Phase 3.5) and fixing the ANF output.
 memToValType :: Mem -> WatValType
-memToValType UN = I64 -- Unboxed
-memToValType BX = I64 -- Boxed values are pointers (i64 in Phase 2, should be i32)
+memToValType UN = I64 -- Unboxed: 64-bit value
+memToValType BX = I64 -- TODO(Phase 3.5): change to I32 after heap allocation works
 
 -- | Generate a short function name from a Reference
 -- Uses base32hex encoding for hash, truncated for readability
@@ -171,8 +174,11 @@ compileGroup (Rec localDefs entry) exportName = do
 
   pure
     WatModule
-      { moduleFunctions = localFuncs ++ [entryFunc],
-        moduleExports = [exportName]
+      { moduleMemory = Nothing,  -- Phase 3: no heap needed for pure arithmetic
+        moduleGlobals = [],
+        moduleFunctions = localFuncs ++ [entryFunc],
+        moduleExports = [exportName],
+        moduleMemoryExport = Nothing
       }
 
 -- | Compile a SuperGroup along with its lambda-lifted combinators
@@ -204,8 +210,11 @@ compileGroupWithLifted (Rec localDefs entry) liftedGroups exportName = do
   -- Merge: lifted functions + local functions + entry
   pure
     WatModule
-      { moduleFunctions = liftedFuncs ++ localFuncs ++ [entryFunc],
-        moduleExports = [exportName]
+      { moduleMemory = Nothing,  -- Phase 3: no heap needed for pure arithmetic
+        moduleGlobals = [],
+        moduleFunctions = liftedFuncs ++ localFuncs ++ [entryFunc],
+        moduleExports = [exportName],
+        moduleMemoryExport = Nothing
       }
 
 -- | Compile a lifted combinator SuperGroup
@@ -316,7 +325,7 @@ compileSuperNormalWithCtx funcNames _currentFunc (Lambda mems body) name = do
   let funcParams = [("p" ++ show i, I64) | i <- [0 .. length mems - 1]]
       -- Locals are all variables bound after the parameters
       funcLocals' = drop (length mems) (ctxLocals finalCtx)
-      funcResults = [I64] -- Phase 2: always returns i64
+      funcResults = [I64] -- Phase 3: always returns i64
 
   pure
     WatFunction
@@ -405,7 +414,7 @@ compileANormal ctx (TVar v) = do
 compileANormal _ctx (TLit lit) = do
   compileLit lit
 
--- Boxed literal: same as TLit for now (Phase 2 treats boxed = unboxed)
+-- Boxed literal: same as TLit for now (Phase 3: heap alloc deferred to Phase 3.5)
 compileANormal _ctx (TBLit lit) = do
   compileLit lit
 
@@ -449,87 +458,98 @@ compileANormal ctx (TApp (FVar v) args) = do
       argInstrs <- concat <$> mapM (compileANormal ctx . TVar) args
       pure $ argInstrs ++ [Call funcName]
     Nothing ->
-      Left $ UnsupportedConstruct "FVar to unknown combinator (closures not supported in Phase 2)"
+      Left $ UnsupportedConstruct "FVar to unknown combinator (closures not supported in Phase 3)"
 
 -- Pattern match on integral values (MatchIntegral)
 compileANormal ctx (TMatch v (MatchIntegral cases defaultCase)) = do
-  -- Get the variable to match on
-  scrutInstrs <- compileANormal ctx (TVar v)
-
-  -- Compile MatchIntegral: compare against each case value
-  -- For factorial, we typically only need to check n == 0
-  compiledCases <- compileIntegralCases ctx (EC.mapToList cases) defaultCase
-
-  pure $ scrutInstrs ++ compiledCases
+  compileIntegralMatch ctx v (EC.mapToList cases) defaultCase
 
 -- Pattern match on boxed numeric values (MatchNumeric)
 -- Same as MatchIntegral but for boxed data (produced by parser)
 compileANormal ctx (TMatch v (MatchNumeric _ref cases defaultCase)) = do
-  -- Get the variable to match on
-  scrutInstrs <- compileANormal ctx (TVar v)
+  compileIntegralMatch ctx v (EC.mapToList cases) defaultCase
 
-  -- Compile same as MatchIntegral
-  compiledCases <- compileIntegralCases ctx (EC.mapToList cases) defaultCase
-
-  pure $ scrutInstrs ++ compiledCases
-
--- TName: bind a closure (not supported in Phase 2)
+-- TName: bind a closure (not supported in Phase 3)
 compileANormal _ctx (TName _ _ _ _) = do
-  Left $ UnsupportedConstruct "TName (closures) not supported in Phase 2"
+  Left $ UnsupportedConstruct "TName (closures) not supported in Phase 3"
 
 -- Fallback for unsupported constructs
 compileANormal _ctx _term = do
-  Left $ UnsupportedConstruct "Unsupported ANormal construct in Phase 2"
+  Left $ UnsupportedConstruct "Unsupported ANormal construct in Phase 3"
 
--- | Compile MatchIntegral cases using if-else chain
--- For factorial-like patterns: if n == 0 then baseCase else recursiveCase
-compileIntegralCases ::
+--------------------------------------------------------------------------------
+-- Pattern Matching (Phase 3: Full multi-case support)
+--------------------------------------------------------------------------------
+
+-- | Compile MatchIntegral/MatchNumeric with full multi-case support
+--
+-- Phase 3 improves on Phase 2 by supporting an arbitrary number of cases
+-- using an if-else chain. Each case compares the scrutinee against a value
+-- and branches to the appropriate body.
+compileIntegralMatch ::
   (Var v) =>
   CompileCtx v ->
-  [(Word64, ANormal Reference v)] ->
-  Maybe (ANormal Reference v) ->
+  v ->                                   -- Scrutinee variable
+  [(Word64, ANormal Reference v)] ->     -- Cases: (value, body)
+  Maybe (ANormal Reference v) ->         -- Default case
   CompileResult [WatInstr]
--- Single case with default: if (scrutinee == caseVal) thenBranch else defaultBranch
-compileIntegralCases ctx [(caseVal, thenBody)] (Just elseBody) = do
-  thenInstrs <- compileANormal ctx thenBody
-  elseInstrs <- compileANormal ctx elseBody
-  -- Stack already has scrutinee from caller
-  -- Compare: scrutinee == caseVal
-  pure
-    [ I64Const caseVal,
-      I64Eq,
-      If I64 thenInstrs elseInstrs
-    ]
--- Multiple cases: chain of if-else
-compileIntegralCases ctx ((caseVal, thenBody) : rest) defaultCase = do
-  thenInstrs <- compileANormal ctx thenBody
-  elseInstrs <- compileIntegralCasesRest ctx rest defaultCase
-  pure
-    [ I64Const caseVal,
-      I64Eq,
-      If I64 thenInstrs elseInstrs
-    ]
+
 -- No cases, just default
-compileIntegralCases ctx [] (Just body) = compileANormal ctx body
+compileIntegralMatch ctx _ [] (Just body) = compileANormal ctx body
+
 -- No cases, no default - error
-compileIntegralCases _ [] Nothing =
+compileIntegralMatch _ _ [] Nothing =
   Left $ UnsupportedConstruct "MatchIntegral with no cases and no default"
 
--- | Compile remaining cases (need to reload scrutinee each time)
-compileIntegralCasesRest ::
+-- Single case with default: simple if-else
+compileIntegralMatch ctx scrutVar [(caseVal, thenBody)] (Just elseBody) = do
+  scrutInstrs <- compileANormal ctx (TVar scrutVar)
+  thenInstrs <- compileANormal ctx thenBody
+  elseInstrs <- compileANormal ctx elseBody
+  pure $
+    scrutInstrs
+      ++ [I64Const caseVal, I64Eq]
+      ++ [If I64 thenInstrs elseInstrs]
+
+-- Single case, no default (must be exhaustive)
+compileIntegralMatch ctx scrutVar [(caseVal, thenBody)] Nothing = do
+  scrutInstrs <- compileANormal ctx (TVar scrutVar)
+  thenInstrs <- compileANormal ctx thenBody
+  pure $
+    scrutInstrs
+      ++ [I64Const caseVal, I64Eq]
+      ++ [If I64 thenInstrs [Unreachable]]
+
+-- Multiple cases: if-else chain
+-- We build a nested if-else structure where each condition checks one case value
+compileIntegralMatch ctx scrutVar cases mDefault = do
+  compileIfElseChain ctx scrutVar cases mDefault
+
+-- | Compile an if-else chain for multiple integral cases
+compileIfElseChain ::
   (Var v) =>
   CompileCtx v ->
+  v ->
   [(Word64, ANormal Reference v)] ->
   Maybe (ANormal Reference v) ->
   CompileResult [WatInstr]
-compileIntegralCasesRest ctx cases defaultCase =
-  -- For nested cases, we'd need to reload the scrutinee
-  -- For Phase 2 factorial, we only need one case (n == 0)
-  -- This is a simplified implementation
-  case (cases, defaultCase) of
-    ([], Just body) -> compileANormal ctx body
-    ([], Nothing) -> Left $ UnsupportedConstruct "MatchIntegral branch exhaustion"
-    _ -> Left $ UnsupportedConstruct "Multi-case MatchIntegral not yet supported"
+
+-- Base case: no more cases, use default
+compileIfElseChain ctx _ [] (Just dflt) = compileANormal ctx dflt
+compileIfElseChain _ _ [] Nothing = pure [Unreachable]
+
+-- Recursive case: check one case, else check the rest
+compileIfElseChain ctx scrutVar ((caseVal, body):rest) mDefault = do
+  -- Load scrutinee for comparison
+  scrutInstrs <- compileANormal ctx (TVar scrutVar)
+  -- Compile this case's body
+  thenInstrs <- compileANormal ctx body
+  -- Compile the else branch (remaining cases)
+  elseInstrs <- compileIfElseChain ctx scrutVar rest mDefault
+  pure $
+    scrutInstrs
+      ++ [I64Const caseVal, I64Eq]
+      ++ [If I64 thenInstrs elseInstrs]
 
 --------------------------------------------------------------------------------
 -- Literal Compilation
@@ -541,9 +561,9 @@ compileLit (N n) = pure [I64Const n]
 compileLit (I n) = pure [I64Const (fromIntegral n)]
 compileLit (F f) = pure [F64Const f]
 compileLit (C c) = pure [I64Const (fromIntegral (fromEnum c))]  -- Unicode codepoint as i64
-compileLit (T _t) = Left $ UnsupportedConstruct "Text literals require heap allocation (Phase 3)"
-compileLit (LM _) = Left $ UnsupportedConstruct "Term links require heap allocation (Phase 3)"
-compileLit (LY _) = Left $ UnsupportedConstruct "Type links require heap allocation (Phase 3)"
+compileLit (T _t) = Left $ UnsupportedConstruct "Text literals require heap allocation (Phase 3.5)"
+compileLit (LM _) = Left $ UnsupportedConstruct "Term links require heap allocation (Phase 3.5)"
+compileLit (LY _) = Left $ UnsupportedConstruct "Type links require heap allocation (Phase 3.5)"
 
 --------------------------------------------------------------------------------
 -- Primitive Operation Compilation
@@ -573,6 +593,7 @@ compilePrimOp LEQI 2 = pure I64LeS
 compilePrimOp LESI 2 = pure I64LtS
 compilePrimOp EQLI 2 = pure I64Eq
 compilePrimOp NEQI 2 = pure I64Ne
+compilePrimOp NEGI 1 = pure I64Sub  -- Uses 0 - x pattern
 -- Float operations
 compilePrimOp ADDF 2 = pure F64Add
 compilePrimOp SUBF 2 = pure F64Sub

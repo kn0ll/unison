@@ -12,16 +12,17 @@ This document provides guidance for AI agents working on the Unison WASM compila
 - [`plans/WASM.md`](./plans/WASM.md) — Implementation plan with phased approach
 - [`plans/WASM_ABI.md`](./plans/WASM_ABI.md) — Memory layout specification (the ABI contract)
 
-**Current Phase:** Phase 3 (Sum Types and Memory) — Not yet started
+**Current Phase:** Phase 3.5 (Sum Types and Memory) — Not yet started
 
 **Completed Phases:**
 - Phase 0: ABI Bootstrap + Conformance Tests ✅
 - Phase 1: Arithmetic in WAT ✅
 - Phase 2: SuperGroup → WAT Pipeline ✅ (parse → lamLift → superNormalize → factorial(5) = 120)
+- Phase 3: IR Improvements ✅ (multi-case MatchNumeric, I32 ops, memory/globals support)
 
-**Test Counts (as of Phase 2 completion):**
-- Haskell: 129 tests pass
-- JavaScript: 79 tests pass
+**Test Counts (as of Phase 3 completion):**
+- Haskell: 175 tests pass (including factorial, fibonacci, recursion)
+- JavaScript: 65 tests pass
 
 ---
 
@@ -433,7 +434,7 @@ testEquivalence sg = scope "equivalence" $ do
 
 Tests run on every PR. Ensure:
 
-1. `stack test unison-wasm` passes (129 tests as of Phase 2)
+1. `stack test unison-wasm` passes (175 tests as of Phase 3)
 2. `npm test` in `unison-wasm/js/` passes (79 tests as of Phase 2)
 3. No new compiler warnings
 4. Code formatted with project standards

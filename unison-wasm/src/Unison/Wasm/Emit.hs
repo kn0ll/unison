@@ -3,12 +3,15 @@
 -- This module provides functions to emit WAT text format for WASM instructions.
 -- The WatInstr/WatFunction/WatModule types serve as an intermediate representation
 -- between SuperGroup compilation and WAT text output.
+--
+-- Phase 3 additions: I32 type, memory operations, globals for heap allocation.
 module Unison.Wasm.Emit
   ( -- * WAT Types
     WatModule (..),
     WatFunction (..),
     WatInstr (..),
     WatValType (..),
+    WatGlobal (..),
 
     -- * Emission
     emitModule,
@@ -18,12 +21,22 @@ module Unison.Wasm.Emit
   )
 where
 
-import Data.Word (Word64)
+import Data.Word (Word32, Word64)
 
 -- | WASM value types
 data WatValType
-  = I64
-  | F64
+  = I32  -- ^ 32-bit integer (used for pointers)
+  | I64  -- ^ 64-bit integer (used for unboxed values)
+  | F64  -- ^ 64-bit float
+  deriving (Eq, Show)
+
+-- | WASM global variable
+data WatGlobal = WatGlobal
+  { globalName :: String,
+    globalType :: WatValType,
+    globalMutable :: Bool,
+    globalInit :: Word64  -- Initial value (also works for i32)
+  }
   deriving (Eq, Show)
 
 -- | WASM instructions (subset needed for current phases)
@@ -32,6 +45,54 @@ data WatInstr
     LocalGet String
   | -- | Set a local variable: @local.set $name@
     LocalSet String
+  | -- | Get a global variable: @global.get $name@
+    GlobalGet String
+  | -- | Set a global variable: @global.set $name@
+    GlobalSet String
+
+  -- i32 operations (for pointers)
+  | -- | i32 constant: @i32.const n@
+    I32Const Word32
+  | -- | i32 addition: @i32.add@
+    I32Add
+  | -- | i32 subtraction: @i32.sub@
+    I32Sub
+  | -- | i32 and: @i32.and@
+    I32And
+  | -- | i32 or: @i32.or@
+    I32Or
+  | -- | i32 left shift: @i32.shl@
+    I32Shl
+  | -- | i32 right shift unsigned: @i32.shr_u@
+    I32ShrU
+  | -- | i32 equality: @i32.eq@
+    I32Eq
+  | -- | i32 not equal: @i32.ne@
+    I32Ne
+  | -- | i32 less than unsigned: @i32.lt_u@
+    I32LtU
+  | -- | i32 greater than or equal unsigned: @i32.ge_u@
+    I32GeU
+  | -- | i32 wrap i64: @i32.wrap_i64@
+    I32WrapI64
+  | -- | i64 extend i32 unsigned: @i64.extend_i32_u@
+    I64ExtendI32U
+
+  -- Memory operations
+  | -- | Load i32 from memory: @i32.load offset=n@
+    I32Load Word32  -- offset
+  | -- | Store i32 to memory: @i32.store offset=n@
+    I32Store Word32  -- offset
+  | -- | Load i64 from memory: @i64.load offset=n@
+    I64Load Word32  -- offset
+  | -- | Store i64 to memory: @i64.store offset=n@
+    I64Store Word32  -- offset
+  | -- | Load i8 from memory (zero-extend to i32): @i32.load8_u offset=n@
+    I32Load8U Word32  -- offset
+  | -- | Store low 8 bits of i32 to memory: @i32.store8 offset=n@
+    I32Store8 Word32  -- offset
+
+  -- i64 operations
   | -- | i64 constant: @i64.const n@
     I64Const Word64
   | -- | i64 addition: @i64.add@
@@ -48,6 +109,14 @@ data WatInstr
     I64RemU
   | -- | i64 signed remainder: @i64.rem_s@
     I64RemS
+  | -- | i64 and: @i64.and@
+    I64And
+  | -- | i64 or: @i64.or@
+    I64Or
+  | -- | i64 left shift: @i64.shl@
+    I64Shl
+  | -- | i64 right shift unsigned: @i64.shr_u@
+    I64ShrU
   | -- | i64 equality: @i64.eq@
     I64Eq
   | -- | i64 not equal: @i64.ne@
@@ -68,6 +137,8 @@ data WatInstr
     I64GeU
   | -- | i64 greater than or equal signed: @i64.ge_s@
     I64GeS
+
+  -- f64 operations
   | -- | f64 constant: @f64.const n@
     F64Const Double
   | -- | f64 addition: @f64.add@
@@ -90,10 +161,14 @@ data WatInstr
     F64Gt
   | -- | f64 greater than or equal: @f64.ge@
     F64Ge
+
+  -- Control flow
   | -- | Call a function: @call $name@
     Call String
   | -- | Conditional branch: @if (result type) ... else ... end@
     If WatValType [WatInstr] [WatInstr]
+  | -- | If without result (for side effects only)
+    IfVoid [WatInstr] [WatInstr]
   | -- | Block for structured control flow
     Block String [WatInstr]
   | -- | Loop for structured control flow
@@ -102,8 +177,14 @@ data WatInstr
     Br String
   | -- | Conditional branch: @br_if $label@
     BrIf String
+  | -- | Branch table: @br_table $l0 $l1 ... $default@
+    BrTable [String] String  -- labels, default
   | -- | Return from function
     Return
+  | -- | Unreachable (trap): @unreachable@
+    Unreachable
+  | -- | Drop top of stack: @drop@
+    Drop
   deriving (Eq, Show)
 
 -- | A WASM function definition
@@ -122,15 +203,22 @@ data WatFunction = WatFunction
 
 -- | A WASM module
 data WatModule = WatModule
-  { -- | Functions defined in this module
+  { -- | Memory size in pages (64KB each), Nothing = no memory
+    moduleMemory :: Maybe Word32,
+    -- | Global variables
+    moduleGlobals :: [WatGlobal],
+    -- | Functions defined in this module
     moduleFunctions :: [WatFunction],
     -- | Exported function names (must reference functions in moduleFunctions)
-    moduleExports :: [String]
+    moduleExports :: [String],
+    -- | Export memory with this name
+    moduleMemoryExport :: Maybe String
   }
   deriving (Eq, Show)
 
 -- | Emit a value type to WAT text
 emitValType :: WatValType -> String
+emitValType I32 = "i32"
 emitValType I64 = "i64"
 emitValType F64 = "f64"
 
@@ -138,6 +226,33 @@ emitValType F64 = "f64"
 emitInstr :: WatInstr -> String
 emitInstr (LocalGet name) = "local.get $" ++ name
 emitInstr (LocalSet name) = "local.set $" ++ name
+emitInstr (GlobalGet name) = "global.get $" ++ name
+emitInstr (GlobalSet name) = "global.set $" ++ name
+
+-- i32 operations
+emitInstr (I32Const n) = "i32.const " ++ show n
+emitInstr I32Add = "i32.add"
+emitInstr I32Sub = "i32.sub"
+emitInstr I32And = "i32.and"
+emitInstr I32Or = "i32.or"
+emitInstr I32Shl = "i32.shl"
+emitInstr I32ShrU = "i32.shr_u"
+emitInstr I32Eq = "i32.eq"
+emitInstr I32Ne = "i32.ne"
+emitInstr I32LtU = "i32.lt_u"
+emitInstr I32GeU = "i32.ge_u"
+emitInstr I32WrapI64 = "i32.wrap_i64"
+emitInstr I64ExtendI32U = "i64.extend_i32_u"
+
+-- Memory operations
+emitInstr (I32Load offset) = "i32.load offset=" ++ show offset
+emitInstr (I32Store offset) = "i32.store offset=" ++ show offset
+emitInstr (I64Load offset) = "i64.load offset=" ++ show offset
+emitInstr (I64Store offset) = "i64.store offset=" ++ show offset
+emitInstr (I32Load8U offset) = "i32.load8_u offset=" ++ show offset
+emitInstr (I32Store8 offset) = "i32.store8 offset=" ++ show offset
+
+-- i64 operations
 emitInstr (I64Const n) = "i64.const " ++ show n
 emitInstr I64Add = "i64.add"
 emitInstr I64Sub = "i64.sub"
@@ -146,6 +261,10 @@ emitInstr I64DivU = "i64.div_u"
 emitInstr I64DivS = "i64.div_s"
 emitInstr I64RemU = "i64.rem_u"
 emitInstr I64RemS = "i64.rem_s"
+emitInstr I64And = "i64.and"
+emitInstr I64Or = "i64.or"
+emitInstr I64Shl = "i64.shl"
+emitInstr I64ShrU = "i64.shr_u"
 emitInstr I64Eq = "i64.eq"
 emitInstr I64Ne = "i64.ne"
 emitInstr I64LtU = "i64.lt_u"
@@ -156,6 +275,8 @@ emitInstr I64GtU = "i64.gt_u"
 emitInstr I64GtS = "i64.gt_s"
 emitInstr I64GeU = "i64.ge_u"
 emitInstr I64GeS = "i64.ge_s"
+
+-- f64 operations
 emitInstr (F64Const f) = "f64.const " ++ show f
 emitInstr F64Add = "f64.add"
 emitInstr F64Sub = "f64.sub"
@@ -167,6 +288,8 @@ emitInstr F64Lt = "f64.lt"
 emitInstr F64Le = "f64.le"
 emitInstr F64Gt = "f64.gt"
 emitInstr F64Ge = "f64.ge"
+
+-- Control flow
 emitInstr (Call name) = "call $" ++ name
 emitInstr (If resultTy thenInstrs elseInstrs) =
   unlines $
@@ -174,6 +297,12 @@ emitInstr (If resultTy thenInstrs elseInstrs) =
       ++ map (("  " ++) . emitInstr) thenInstrs
       ++ ["else"]
       ++ map (("  " ++) . emitInstr) elseInstrs
+      ++ ["end"]
+emitInstr (IfVoid thenInstrs elseInstrs) =
+  unlines $
+    ["if"]
+      ++ map (("  " ++) . emitInstr) thenInstrs
+      ++ (if null elseInstrs then [] else ["else"] ++ map (("  " ++) . emitInstr) elseInstrs)
       ++ ["end"]
 emitInstr (Block label instrs) =
   unlines $
@@ -187,7 +316,19 @@ emitInstr (Loop label instrs) =
       ++ ["end"]
 emitInstr (Br label) = "br $" ++ label
 emitInstr (BrIf label) = "br_if $" ++ label
+emitInstr (BrTable labels dflt) =
+  "br_table " ++ unwords (map ("$" ++) labels) ++ " $" ++ dflt
 emitInstr Return = "return"
+emitInstr Unreachable = "unreachable"
+emitInstr Drop = "drop"
+
+-- | Emit a global variable definition
+emitGlobal :: WatGlobal -> String
+emitGlobal g =
+  "  (global $" ++ globalName g ++ " " ++ mutability ++ emitValType (globalType g) ++ " (" ++ emitValType (globalType g) ++ ".const " ++ initVal ++ "))"
+  where
+    mutability = if globalMutable g then "(mut " else "("
+    initVal = show (globalInit g) ++ ")"
 
 -- | Emit a function definition to WAT text
 emitFunction :: WatFunction -> String
@@ -222,9 +363,20 @@ emitModule :: WatModule -> String
 emitModule m =
   unlines $
     ["(module"]
+      ++ memoryDecl
+      ++ map emitGlobal (moduleGlobals m)
       ++ map emitFunction (moduleFunctions m)
       ++ map emitExport (moduleExports m)
+      ++ memoryExportDecl
       ++ [")"]
   where
+    memoryDecl = case moduleMemory m of
+      Nothing -> []
+      Just pages -> ["  (memory " ++ show pages ++ ")"]
+
+    memoryExportDecl = case moduleMemoryExport m of
+      Nothing -> []
+      Just name -> ["  (export \"" ++ name ++ "\" (memory 0))"]
+
     emitExport name =
       "  (export \"" ++ name ++ "\" (func $" ++ name ++ "))"
