@@ -24,7 +24,8 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "typescript": "^5.3.0"
+    "typescript": "^5.3.0",
+    "wabt": "^1.0.36"
   },
   "keywords": [
     "unison",

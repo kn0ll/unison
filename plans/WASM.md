@@ -457,7 +457,9 @@ Each phase has a **verification checkpoint** — an interactive experience to co
 
 ---
 
-### Phase 0: ABI Bootstrap + Conformance Tests
+### Phase 0: ABI Bootstrap + Conformance Tests ✅
+
+**Status:** Complete (49 JS tests, 73 Haskell tests passing)
 
 **Goal:** Generate ABI constants from spec and create conformance test suite before writing any compiler code.
 
@@ -480,74 +482,58 @@ Each phase has a **verification checkpoint** — an interactive experience to co
 3. Create memory inspector scaffolding (reads heap, decodes objects)
 4. Write ABI conformance test suite (see below)
 
-**ABI Conformance Test Suite (`test/phase0-abi/`):**
+**ABI Conformance Test Suite (`js/tests/abi.test.js`):**
 ```javascript
-// test-abi-conformance.js
-import { allocEnum, allocData1, allocData2, allocPAp, allocText } from './wasm-alloc.js';
-import { decodeObject, inspectMemory } from './wasm-debug.js';
+// Actual test structure (see unison-wasm/js/tests/abi.test.js for full tests)
+import { describe, it, before } from 'node:test';
+import assert from 'node:assert/strict';
+import { createHeapAllocator } from '../dist/wasm-alloc.js';
+import { decodeObject } from '../dist/wasm-debug.js';
+import { OBJ_ENUM, OBJ_DATA1, TYPE_NAT } from '../dist/abi-constants.js';
 
-// Test each object type can be allocated and decoded
-test('Enum layout', () => {
-  const ptr = allocEnum(TYPE_REF_BOOL, CTOR_TRUE);
-  const obj = decodeObject(memory, ptr);
-  expect(obj.tag).toBe(OBJ_ENUM);
-  expect(obj.packedTag).toBe(CTOR_TRUE);
-});
+describe('ABI Conformance', () => {
+  let memory, alloc;
 
-test('Data1 layout', () => {
-  const ptr = allocData1(TYPE_REF_OPTIONAL, CTOR_SOME, { tag: TYPE_NAT, payload: 42n });
-  const obj = decodeObject(memory, ptr);
-  expect(obj.tag).toBe(OBJ_DATA1);
-  expect(obj.fields[0].tag).toBe(TYPE_NAT);
-  expect(obj.fields[0].payload).toBe(42n);
-});
+  before(() => {
+    memory = new WebAssembly.Memory({ initial: 1 });
+    alloc = createHeapAllocator(memory, 0x1000);
+  });
 
-test('Text layout', () => {
-  const ptr = allocText("hello");
-  const obj = decodeObject(memory, ptr);
-  expect(obj.tag).toBe(OBJ_TEXT);
-  expect(obj.byteLen).toBe(5);
-  expect(obj.content).toBe("hello");
-});
+  it('Enum allocates with correct header', () => {
+    const ptr = alloc.allocEnum(0x100, 1);
+    const obj = decodeObject(memory.buffer, ptr);
+    assert.strictEqual(obj.objTag, OBJ_ENUM);
+  });
 
-test('Alignment', () => {
-  const ptrs = [allocEnum(), allocData1(), allocData2()];
-  for (const ptr of ptrs) {
-    expect(ptr % 8).toBe(0);  // 8-byte aligned
-  }
-});
-
-test('Header decoding', () => {
-  const ptr = allocData2(...);
-  const header = memory.getBigUint64(ptr, true);
-  const version = (header >> 60n) & 0xFn;
-  const tag = (header >> 48n) & 0xFFFn;
-  expect(version).toBe(0n);  // ABI version 0
-  expect(tag).toBe(BigInt(OBJ_DATA2));
+  it('Data1 stores TypedSlot field correctly', () => {
+    const field0 = { typeTag: TYPE_NAT, payload: 42n };
+    const ptr = alloc.allocData1(0x200, 0, field0);
+    const obj = decodeObject(memory.buffer, ptr);
+    assert.strictEqual(obj.data.field0.typeTag, TYPE_NAT);
+    assert.strictEqual(obj.data.field0.payload, 42n);
+  });
 });
 ```
 
 **Verification Checkpoint:**
 ```bash
-$ npm test -- phase0-abi
-✓ Enum layout
-✓ Data1 layout
-✓ Data2 layout
-✓ PAp layout
-✓ Captured layout
-✓ Text layout
-✓ Bytes layout
-✓ Sequence layout
-✓ Alignment
-✓ Header decoding
-10 tests passed
+$ cd unison-wasm/js && npm test
+✓ ABI Constants (5 tests)
+✓ Header Encoding (4 tests)
+✓ Packed Tag Encoding (3 tests)
+✓ Alignment (1 test)
+✓ Size Calculations (9 tests)
+... and more
+49 tests passed
 ```
 
 **Exit Criteria:** All heap object types can be allocated and decoded correctly by the memory inspector.
 
 ---
 
-### Phase 1: Arithmetic in WAT
+### Phase 1: Arithmetic in WAT ✅
+
+**Status:** Complete (17 WAT execution tests, 35 Haskell emission tests passing)
 
 **Goal:** Compile a pure Unison function to WAT and run it.
 
@@ -565,31 +551,31 @@ $ npm test -- phase0-abi
 | **Deferred** | SuperGroup traversal (Phase 2), Memory allocation (Phase 3) |
 
 **Tasks:**
-1. Create `unison-wasm/` package with Cabal file and module skeleton
-2. Build WAT text format emitter for basic instructions
-3. Hardcode compilation of `increment n = n + 1` to WAT
-4. Create test harness that runs WAT via Node.js/wasmtime (reuse Phase 0 harness)
+1. Create `unison-wasm/` package with Cabal file and module skeleton ✅
+2. Build WAT text format emitter for basic instructions ✅
+3. Hardcode compilation of `increment n = n + 1` to WAT ✅
+4. Create test harness that runs WAT via Node.js/wasmtime (reuse Phase 0 harness) ✅
 
-**Verification Checkpoint:**
+**Verification Checkpoint (Passed):**
 ```bash
 # CLI tool that emits WAT for a hardcoded function
-$ unison-wasm-poc emit-increment > increment.wat
+$ stack exec unison-wasm-poc -- emit-increment > increment.wat
 
-# Run it via wasmtime or node
-$ wasmtime run increment.wat --invoke increment 5
-6
-
-# Or via Node.js
+# Run it via Node.js (from unison-wasm/js/)
 $ node -e "
   const fs = require('fs');
-  const wabt = require('wabt')();
-  const wat = fs.readFileSync('increment.wat', 'utf8');
-  const module = wabt.parseWat('increment.wat', wat);
-  const binary = module.toBinary({}).buffer;
-  WebAssembly.instantiate(binary).then(({instance}) => {
-    console.log(instance.exports.increment(5n)); // 6n
-  });
+  async function main() {
+    const wabt = await import('wabt');
+    const wabtModule = await wabt.default();
+    const wat = fs.readFileSync('increment.wat', 'utf8');
+    const module = wabtModule.parseWat('increment.wat', wat);
+    const binary = module.toBinary({}).buffer;
+    const { instance } = await WebAssembly.instantiate(binary);
+    console.log('increment(5) =', instance.exports.increment(5n));
+  }
+  main();
 "
+# Output: increment(5) = 6n
 ```
 
 **Exit Criteria:** A human can run `increment(5)` and see `6`.
@@ -1023,38 +1009,35 @@ try {
 - [`plans/WASM_ABI.md`](./WASM_ABI.md) - Memory layout and calling convention specification
 
 ### Generated from Spec (Phase 0)
-- `unison-wasm/src/Unison/Wasm/ABI.hs` - Constants generated from WASM_ABI.md
-- `unison-wasm/js/abi-constants.js` - Same constants for JS runtime
+- `unison-wasm/src/Unison/Wasm/ABI.hs` - Constants generated from WASM_ABI.md ✅
+- `unison-wasm/js/src/abi-constants.ts` - Same constants for JS runtime (TypeScript) ✅
 
 ### Implementation (Haskell)
 - `unison-wasm/src/Unison/Wasm/Compile.hs` - SuperGroup → WASM compilation
-- `unison-wasm/src/Unison/Wasm/Emit.hs` - WAT text format emission
+- `unison-wasm/src/Unison/Wasm/Emit.hs` - WAT text format emission ✅
 - `unison-wasm/src/Unison/Wasm/Binary.hs` - WASM binary format emission
 - `unison-wasm/src/Unison/Wasm/Primitives.hs` - Primitive operation codegen
 - `unison-wasm/src/Unison/Wasm/TypeScript.hs` - Generate `.d.ts` type definitions
 
-### JavaScript Runtime
-- `unison-wasm/js/runtime.js` - Foreign handle table, imports, async coordination
-- `unison-wasm/js/apply.js` - Generic closure apply with TypeTag checking
-- `unison-wasm/js/debug.js` - Memory inspector for development
-- `unison-wasm/js/continuation.js` - ContinuationHandle with exactly-once enforcement
+### JavaScript/TypeScript Runtime
+- `unison-wasm/js/src/wasm-alloc.ts` - Heap allocators (TypeScript) ✅
+- `unison-wasm/js/src/wasm-debug.ts` - Memory inspector/decoders ✅
+- `unison-wasm/js/src/errors.ts` - Error classes ✅
+- `unison-wasm/js/src/index.ts` - Re-exports ✅
+- `unison-wasm/js/src/runtime.ts` - Foreign handle table, imports (future)
+- `unison-wasm/js/src/continuation.ts` - ContinuationHandle (future)
 
-### Test Harnesses (one per phase)
-- `unison-wasm/test/phase0-abi/` - ABI conformance tests (run first!)
-  - `test-abi-conformance.js` - All object type layouts
-  - `wasm-alloc.js` - Allocator functions
-  - `wasm-debug.js` - Memory inspector
-- `unison-wasm/test/phase1-arithmetic/` - Hardcoded increment test
-- `unison-wasm/test/phase2-pipeline/` - SuperGroup pipeline test
-- `unison-wasm/test/phase3-memory/` - Memory allocator integration
-- `unison-wasm/test/phase4-closures/` - HOF and partial application
-- `unison-wasm/test/phase5-abilities/` - Counter/State ability tests
-- `unison-wasm/test/phase6-foreign/` - JS interop tests
-- `unison-wasm/test/phase7-async/` - Async tests including:
-  - `test-fetch.html` - Happy path async
-  - `test-double-resume.js` - Exactly-once enforcement
-  - `test-nested-async.js` - Nesting rejection
-- `unison-wasm/test/phase8-demo/` - Full integration demo
+### CLI Executable
+- `unison-wasm/app/Main.hs` - `unison-wasm-poc` CLI ✅
+
+### Test Harnesses
+- `unison-wasm/tests/` - Haskell tests (EasyTest) ✅
+  - `Suite.hs` - Main entry point
+  - `Unison/Test/Wasm/ABI.hs` - ABI constants tests
+  - `Unison/Test/Wasm/Emit.hs` - WAT emission tests
+- `unison-wasm/js/tests/` - TypeScript/JavaScript tests ✅
+  - `abi.test.js` - ABI conformance tests (Phase 0)
+  - `wat.test.js` - WAT execution tests (Phase 1)
 
 ### Reference (existing code to study)
 - [`unison-runtime/src/Unison/Runtime/MCode.hs`](../unison-runtime/src/Unison/Runtime/MCode.hs) - `emitSection`, `emitFunction` patterns

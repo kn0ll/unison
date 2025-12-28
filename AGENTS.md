@@ -12,7 +12,11 @@ This document provides guidance for AI agents working on the Unison WASM compila
 - [`plans/WASM.md`](./plans/WASM.md) — Implementation plan with phased approach
 - [`plans/WASM_ABI.md`](./plans/WASM_ABI.md) — Memory layout specification (the ABI contract)
 
-**Current Phase:** Phase 0 (ABI Bootstrap + Conformance Tests)
+**Current Phase:** Phase 2 (SuperGroup → WAT Pipeline)
+
+**Completed Phases:**
+- Phase 0: ABI Bootstrap + Conformance Tests ✅
+- Phase 1: Arithmetic in WAT ✅
 
 ---
 
@@ -319,39 +323,35 @@ $ stack test unison-wasm --test-arguments "emit.instruction"
 $ stack test unison-wasm --test-arguments "12345 emit"
 ```
 
-### JavaScript Tests (Phase 0 and WASM verification)
+### JavaScript/TypeScript Tests (Phase 0+ and WASM verification)
 
-Phase 0 and WASM runtime verification use JavaScript tests. Use the Node.js standard test runner.
+Phase 0+ and WASM runtime verification use TypeScript with Node.js built-in test runner.
 
 ```javascript
-// unison-wasm/test/phase0-abi/abi.test.js
-import { describe, it, expect } from 'vitest';
-import { allocEnum, allocData1, decodeObject } from './wasm-alloc.js';
-import { OBJ_ENUM, OBJ_DATA1, TYPE_NAT } from './abi-constants.js';
+// unison-wasm/js/tests/abi.test.js
+import { describe, it, before } from 'node:test';
+import assert from 'node:assert/strict';
+import { createHeapAllocator, allocEnum, decodeObject } from '../dist/index.js';
+import { OBJ_ENUM, TYPE_NAT } from '../dist/abi-constants.js';
 
 describe('ABI Conformance', () => {
+  let memory, alloc;
+
+  before(() => {
+    memory = new WebAssembly.Memory({ initial: 1 });
+    alloc = createHeapAllocator(memory, 0x1000);
+  });
+
   describe('Enum layout', () => {
     it('allocates with correct header', () => {
-      const ptr = allocEnum(TYPE_REF_BOOL, CTOR_TRUE);
-      const obj = decodeObject(memory, ptr);
-      expect(obj.tag).toBe(OBJ_ENUM);
+      const ptr = alloc.allocEnum(0x100, 1);
+      const obj = decodeObject(memory.buffer, ptr);
+      assert.strictEqual(obj.objTag, OBJ_ENUM);
     });
 
     it('is 8-byte aligned', () => {
-      const ptr = allocEnum(TYPE_REF_BOOL, CTOR_TRUE);
-      expect(ptr % 8).toBe(0);
-    });
-  });
-
-  describe('Data1 layout', () => {
-    it('stores TypedSlot field correctly', () => {
-      const ptr = allocData1(TYPE_REF_OPTIONAL, CTOR_SOME, {
-        tag: TYPE_NAT,
-        payload: 42n
-      });
-      const obj = decodeObject(memory, ptr);
-      expect(obj.fields[0].tag).toBe(TYPE_NAT);
-      expect(obj.fields[0].payload).toBe(42n);
+      const ptr = alloc.allocEnum(0x100, 0);
+      assert.strictEqual(ptr % 8, 0);
     });
   });
 });
@@ -360,11 +360,10 @@ describe('ABI Conformance', () => {
 **Running JavaScript tests:**
 
 ```bash
-# From unison-wasm/test/
+# From unison-wasm/js/
 $ npm test
 
-# Or with vitest directly
-$ npx vitest run phase0-abi/
+# Runs: tsc && node --test tests/
 ```
 
 ### Test Directory Structure
@@ -377,20 +376,24 @@ unison-wasm/
 │       └── Test/
 │           └── Wasm/
 │               ├── ABI.hs          # ABI constants tests
-│               ├── Emit.hs         # WAT emission tests
-│               ├── Compile.hs      # SuperGroup→WASM tests
-│               └── Primitives.hs   # Primitive op tests
+│               └── Emit.hs         # WAT emission tests
 │
-└── test/                           # JavaScript tests
-    ├── package.json
-    ├── vitest.config.js
-    ├── phase0-abi/                 # ABI conformance (Phase 0)
-    │   ├── abi.test.js
-    │   ├── wasm-alloc.js
-    │   └── wasm-debug.js
-    ├── phase1-arithmetic/          # Basic function tests
-    ├── phase3-memory/              # Memory inspector tests
-    └── ...
+├── js/                             # TypeScript/JavaScript runtime
+│   ├── package.json
+│   ├── tsconfig.json               # Strict TypeScript config
+│   ├── src/                        # TypeScript source
+│   │   ├── index.ts                # Re-exports
+│   │   ├── abi-constants.ts        # ABI constants (single source of truth)
+│   │   ├── wasm-alloc.ts           # Heap allocators
+│   │   ├── wasm-debug.ts           # Memory inspector/decoders
+│   │   └── errors.ts               # Error classes
+│   ├── dist/                       # Compiled JavaScript output
+│   └── tests/                      # Node.js tests
+│       ├── abi.test.js             # ABI conformance tests (Phase 0)
+│       └── wat.test.js             # WAT execution tests (Phase 1)
+│
+└── app/                            # CLI executable
+    └── Main.hs                     # unison-wasm-poc
 ```
 
 ### What to Test Where
@@ -399,10 +402,10 @@ unison-wasm/
 |-----------|----------|-----------|
 | IR traversal, codegen logic | `tests/` (Haskell) | EasyTest |
 | WAT text emission | `tests/` (Haskell) | EasyTest |
-| ABI layout conformance | `test/` (JS) | Vitest |
-| WASM execution correctness | `test/` (JS) | Vitest + WASM |
-| Memory inspector | `test/` (JS) | Vitest |
-| Async/continuation handling | `test/` (JS) | Vitest |
+| ABI layout conformance | `js/tests/` (TS) | node:test |
+| WASM execution correctness | `js/tests/` (TS) | node:test + wabt |
+| Memory inspector | `js/tests/` (TS) | node:test |
+| Async/continuation handling | `js/tests/` (TS) | node:test |
 
 ### Behavioral Equivalence Tests
 
@@ -424,8 +427,8 @@ testEquivalence sg = scope "equivalence" $ do
 
 Tests run on every PR. Ensure:
 
-1. `stack test unison-wasm` passes
-2. `npm test` in `unison-wasm/test/` passes
+1. `stack test unison-wasm` passes (108 tests as of Phase 1)
+2. `npm test` in `unison-wasm/js/` passes (66 tests as of Phase 1)
 3. No new compiler warnings
 4. Code formatted with project standards
 

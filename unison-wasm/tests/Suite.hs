@@ -8,11 +8,13 @@ import System.Environment (getArgs)
 import System.IO
 import System.IO.CodePage (withCP65001)
 import Unison.Test.Wasm.ABI qualified as ABI
+import Unison.Test.Wasm.Emit qualified as Emit
 
 test :: Test ()
 test =
   tests
-    [ ABI.test
+    [ ABI.test,
+      Emit.test
     ]
 
 main :: IO ()
