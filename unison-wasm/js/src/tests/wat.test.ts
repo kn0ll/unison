@@ -219,12 +219,11 @@ describe('Compiled Unison: Simple Functions', () => {
 });
 
 // =============================================================================
-// Phase 2 Exit Criteria: Factorial from Actual Unison Source
+// Factorial from Actual Unison Source
 // =============================================================================
-// The Phase 2 exit criterion is: "Compile and run factorial from actual Unison source"
 // This tests the full pipeline with MatchIntegral, recursive calls, and TLets.
 
-describe('Phase 2 Exit Criteria: Factorial', () => {
+describe('Factorial from Unison Source', () => {
   before(async () => {
     if (!wabtModule) {
       const wabt = await import('wabt');
@@ -294,8 +293,8 @@ describe('Phase 2 Exit Criteria: Factorial', () => {
     assert.strictEqual(factorial(), 120n, 'factorial() must equal 120 (5!)');
   });
 
-  it('PHASE 2 EXIT: Full pipeline Unison → WAT → WASM → 120', async () => {
-    // This is the definitive Phase 2 exit test:
+  it('Full pipeline Unison → WAT → WASM → 120', async () => {
+    // This is the full pipeline test:
     // 1. Parse actual Unison code (not handcrafted SuperGroup)
     // 2. Lambda-lift 'go' to a separate combinator
     // 3. Compile each combinator to WAT

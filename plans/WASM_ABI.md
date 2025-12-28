@@ -16,6 +16,76 @@ This document defines the memory layout and calling conventions for the Unison W
 2. **Debuggable**: Memory layouts should be inspectable from JS dev tools
 3. **Aligned**: All heap allocations are 8-byte aligned for i64/f64 access
 4. **Versioned**: Header words include version bits for future evolution
+5. **Native-aligned**: Data structures mirror the native Haskell runtime where possible
+
+---
+
+## Alignment with Native Runtime
+
+This section documents how our WASM ABI maps to the native Unison runtime in `unison-runtime/`.
+Keeping these aligned ensures behavioral equivalence and eases debugging.
+
+### GClosure → ObjTag Mapping
+
+| Native (`Stack.hs`) | WASM ABI | Notes |
+|---------------------|----------|-------|
+| `GPAp` | `OBJ_PAP` (0x005) | Partial application |
+| `GEnum` | `OBJ_ENUM` (0x001) | Nullary constructor |
+| `GData1` | `OBJ_DATA1` (0x002) | 1-field constructor |
+| `GData2` | `OBJ_DATA2` (0x003) | 2-field constructor |
+| `GDataG` | `OBJ_DATAG` (0x004) | N-field constructor |
+| `GCaptured` | `OBJ_CAPTURED` (0x006) | Captured continuation |
+| `GForeign` | `OBJ_FOREIGN` (0x007) | Opaque JS handle |
+| `GUnboxedTypeTag` | `TYPE_*` constants | Type discriminator for unboxed values |
+
+### K Frame → FrameTag Mapping
+
+| Native (`Stack.hs`) | WASM ABI | Notes |
+|---------------------|----------|-------|
+| `KE` | `FRAME_KE` (0x00) | Empty continuation (stack bottom) |
+| `Push` | `FRAME_PUSH` (0x01) | Normal return frame |
+| `Mark` | `FRAME_MARK` (0x02) | Ability handler marker |
+
+### Val → TypedSlot Mapping
+
+| Native | WASM ABI | Notes |
+|--------|----------|-------|
+| `Val { unboxed :: Int, boxed :: Closure }` | `TypedSlot { TypeTag, Payload64 }` | Conceptually equivalent |
+| `GUnboxedTypeTag NatTag` (in boxed slot) | `TYPE_NAT` (in TypeTag) | Type info location differs |
+| Unboxed value in `unboxed` field | Value in `Payload64` | Same semantics |
+
+### PackedTag Alignment
+
+Native runtime (`TypeTags.hs`):
+```
+PackedTag = RTag << 16 | CTag
+RTag: 48-bit type reference number
+CTag: 16-bit constructor ID
+```
+
+Pattern matching uses `maskTags` to extract just the CTag (lower 16 bits) for comparison.
+Our `MatchData` compilation correctly compares constructor IDs only.
+
+### Key Differences
+
+| Aspect | Native | WASM | Rationale |
+|--------|--------|------|-----------|
+| PAp function ref | `CombIx` (Reference + indices) | `func_id` (table index) | WASM uses `call_indirect` |
+| RSection caching | Stored in Push frames | Computed from CombIx | Different execution model |
+| DEnv | `EnumMap Word64 Closure` | TBD (Phase 5) | Needs design |
+
+### Reference Functions
+
+When implementing new features, consult these native runtime functions:
+
+| Function | File | Purpose |
+|----------|------|---------|
+| `dataBranch` | `Machine.hs` | Pattern matching on data types |
+| `splitCont` | `Machine.hs` | Capture continuation up to marker |
+| `repush` | `Machine.hs` | Resume captured continuation |
+| `buildData` | `Machine.hs` | Construct Enum/Data1/Data2/DataG |
+| `closureTag` | `Stack.hs` | Extract PackedTag from closure |
+| `maskTags` | `TypeTags.hs` | Extract CTag from PackedTag |
 
 ---
 

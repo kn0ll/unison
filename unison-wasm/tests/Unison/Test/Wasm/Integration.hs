@@ -184,7 +184,10 @@ test =
       testCompoundExpressions,
       testPatternMatching,
       testRecursion,
-      testDivisionByZero
+      testDivisionByZero,
+      testClosures,
+      testSumTypes,
+      testPartialReturn
     ]
 
 --------------------------------------------------------------------------------
@@ -246,7 +249,7 @@ testIntArithmetic =
 -- Float Arithmetic Tests
 -- NOTE: Float tests are pending - requires function return type inference.
 -- Currently all functions hardcode (result i64), but Float ops return f64.
--- TODO(Phase 4): Infer result type from body expression type.
+-- TODO: Infer result type from body expression type.
 --------------------------------------------------------------------------------
 
 testFloatArithmetic :: Test ()
@@ -374,13 +377,13 @@ testPatternMatching =
     ]
 
 --------------------------------------------------------------------------------
--- Recursion Tests (Phase 3 Milestone!)
+-- Recursion Tests
 --------------------------------------------------------------------------------
 
 testRecursion :: Test ()
 testRecursion =
   scope "recursion" . tests $
-    [ -- FACTORIAL: The Phase 3 exit criteria!
+    [ -- FACTORIAL: The classic recursive test
       testE2E "factorial_5"
         (intercalate "\n"
           [ "let"
@@ -468,3 +471,254 @@ testDivisionByZero =
 -- testE2E "float_div_zero" "##Float./ 1.0 0.0" (WasmF64 Infinity)
 -- testE2E "float_div_neg_zero" "##Float./ -1.0 0.0" (WasmF64 (-Infinity))
 -- testE2E "float_zero_div_zero" "##Float./ 0.0 0.0" (WasmF64 NaN)
+
+--------------------------------------------------------------------------------
+-- Closures and Higher-Order Functions
+--------------------------------------------------------------------------------
+-- Tests for closures, partial application, and higher-order function usage.
+-- These verify that PAp allocation, captured values, and apply work correctly.
+
+testClosures :: Test ()
+testClosures =
+  scope "closures" . tests $
+    [ -- Basic curried function (fully applied)
+      testE2E "curried_add"
+        (intercalate "\n"
+          [ "let"
+          , "f x y = ##Nat.+ x y"
+          , "f 3 4"
+          ])
+        (WasmI64 7),
+
+      -- Single-argument closure (lambda)
+      testE2E "single_arg_closure"
+        (intercalate "\n"
+          [ "let"
+          , "inc = x -> ##Nat.+ x 1"
+          , "inc 5"
+          ])
+        (WasmI64 6),
+
+      -- Closure capturing a value
+      testE2E "closure_capture"
+        (intercalate "\n"
+          [ "let"
+          , "addN n = x -> ##Nat.+ n x"
+          , "(addN 10) 5"
+          ])
+        (WasmI64 15),
+
+      -- Nested closures
+      testE2E "nested_closures"
+        (intercalate "\n"
+          [ "let"
+          , "add = x -> y -> ##Nat.+ x y"
+          , "(add 7) 8"
+          ])
+        (WasmI64 15),
+
+      -- Higher-order function: apply a function to a value
+      testE2E "hof_apply"
+        (intercalate "\n"
+          [ "let"
+          , "apply f x = f x"
+          , "inc = x -> ##Nat.+ x 1"
+          , "apply inc 10"
+          ])
+        (WasmI64 11),
+
+      -- Multiple captures in one closure
+      testE2E "multi_capture"
+        (intercalate "\n"
+          [ "let"
+          , "linear a b = x -> ##Nat.+ (##Nat.* a x) b"
+          , "(linear 3 2) 4"
+          ])
+        (WasmI64 14),  -- 3*4 + 2 = 14
+
+      -- Closure as result, then applied
+      testE2E "closure_return"
+        (intercalate "\n"
+          [ "let"
+          , "makeAdder n = x -> ##Nat.+ n x"
+          , "add5 = makeAdder 5"
+          , "add5 7"
+          ])
+        (WasmI64 12)
+    ]
+
+--------------------------------------------------------------------------------
+-- Sum Types (Enums)
+--------------------------------------------------------------------------------
+-- Tests for Boolean and other enum types (no fields).
+-- Data types with fields (Optional, Either) are not yet supported.
+
+testSumTypes :: Test ()
+testSumTypes =
+  scope "sum_types" . tests $
+    [ -- Boolean: true = 1, false = 0
+      testE2E "bool_true"
+        "true"
+        (WasmI64 1),
+
+      testE2E "bool_false"
+        "false"
+        (WasmI64 0),
+
+      -- Boolean negation
+      testE2E "bool_not_true"
+        (intercalate "\n"
+          [ "let"
+          , "not b = match b with"
+          , "  true -> false"
+          , "  false -> true"
+          , "not true"
+          ])
+        (WasmI64 0),
+
+      testE2E "bool_not_false"
+        (intercalate "\n"
+          [ "let"
+          , "not b = match b with"
+          , "  true -> false"
+          , "  false -> true"
+          , "not false"
+          ])
+        (WasmI64 1),
+
+      -- Boolean AND
+      testE2E "bool_and_tt"
+        (intercalate "\n"
+          [ "let"
+          , "and a b = match a with"
+          , "  false -> false"
+          , "  true -> b"
+          , "and true true"
+          ])
+        (WasmI64 1),
+
+      testE2E "bool_and_tf"
+        (intercalate "\n"
+          [ "let"
+          , "and a b = match a with"
+          , "  false -> false"
+          , "  true -> b"
+          , "and true false"
+          ])
+        (WasmI64 0),
+
+      testE2E "bool_and_ff"
+        (intercalate "\n"
+          [ "let"
+          , "and a b = match a with"
+          , "  false -> false"
+          , "  true -> b"
+          , "and false false"
+          ])
+        (WasmI64 0),
+
+      -- Boolean OR
+      testE2E "bool_or_ff"
+        (intercalate "\n"
+          [ "let"
+          , "or a b = match a with"
+          , "  true -> true"
+          , "  false -> b"
+          , "or false false"
+          ])
+        (WasmI64 0),
+
+      testE2E "bool_or_tf"
+        (intercalate "\n"
+          [ "let"
+          , "or a b = match a with"
+          , "  true -> true"
+          , "  false -> b"
+          , "or true false"
+          ])
+        (WasmI64 1),
+
+      -- If-then-else via pattern matching
+      testE2E "bool_if_then_else"
+        (intercalate "\n"
+          [ "let"
+          , "ifThenElse cond t f = match cond with"
+          , "  true -> t"
+          , "  false -> f"
+          , "ifThenElse true 42 0"
+          ])
+        (WasmI64 42)
+    ]
+
+--------------------------------------------------------------------------------
+-- Partial Application Return Tests
+--------------------------------------------------------------------------------
+-- Tests for when applying to a closure that needs more args than provided.
+-- The result should be a new closure with the provided args captured.
+
+testPartialReturn :: Test ()
+testPartialReturn =
+  scope "partial_return" . tests $
+    [ -- Basic partial application: add takes 2 args, we provide 1
+      testE2E "partial_add_1"
+        (intercalate "\n"
+          [ "let"
+          , "add a b = ##Nat.+ a b"
+          , "add1 = add 1"
+          , "add1 5"
+          ])
+        (WasmI64 6),
+
+      -- Double partial application: 3-arg function, apply 1, then 1 more, then 1
+      testE2E "partial_add3_chain"
+        (intercalate "\n"
+          [ "let"
+          , "add3 a b c = ##Nat.+ a (##Nat.+ b c)"
+          , "f1 = add3 1"
+          , "f2 = f1 2"
+          , "f2 3"
+          ])
+        (WasmI64 6),
+
+      -- Partial with different values
+      testE2E "partial_mul"
+        (intercalate "\n"
+          [ "let"
+          , "mul a b = ##Nat.* a b"
+          , "times3 = mul 3"
+          , "times3 7"
+          ])
+        (WasmI64 21),
+
+      -- Partial on closure that captures
+      testE2E "partial_capture"
+        (intercalate "\n"
+          [ "let"
+          , "k = 10"
+          , "addK a b = ##Nat.+ k (##Nat.+ a b)"
+          , "addK5 = addK 5"
+          , "addK5 7"
+          ])
+        (WasmI64 22),
+
+      -- Partial returning a closure that gets fully applied
+      testE2E "partial_hof"
+        (intercalate "\n"
+          [ "let"
+          , "apply f x = f x"
+          , "inc n = ##Nat.+ n 1"
+          , "applyInc = apply inc"
+          , "applyInc 10"
+          ])
+        (WasmI64 11),
+
+      -- Multi-arg partial application: apply 2 args to 3-arg function
+      testE2E "partial_2_of_3"
+        (intercalate "\n"
+          [ "let"
+          , "sum3 a b c = ##Nat.+ a (##Nat.+ b c)"
+          , "partial12 = sum3 10 20"
+          , "partial12 5"
+          ])
+        (WasmI64 35)
+    ]

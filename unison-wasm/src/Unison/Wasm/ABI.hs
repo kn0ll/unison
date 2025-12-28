@@ -4,7 +4,7 @@
 --
 -- This module provides the canonical Haskell definitions for the WASM ABI
 -- specified in plans/WASM_ABI.md. These constants MUST match the JavaScript
--- runtime's abi-constants.js exactly.
+-- runtime's abi-constants.ts exactly.
 --
 -- == ABI Version
 -- Version: 0.1.0-draft

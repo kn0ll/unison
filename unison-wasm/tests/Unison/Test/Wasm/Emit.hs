@@ -31,8 +31,8 @@ testInstructions =
       scope "local.set" $ expectEqual (emitInstr (LocalSet "n")) "local.set $n",
       scope "global.get" $ expectEqual (emitInstr (GlobalGet "heap_ptr")) "global.get $heap_ptr",
       scope "global.set" $ expectEqual (emitInstr (GlobalSet "heap_ptr")) "global.set $heap_ptr",
-      
-      -- i32 operations (Phase 3)
+
+      -- i32 operations
       scope "i32.const_0" $ expectEqual (emitInstr (I32Const 0)) "i32.const 0",
       scope "i32.const_16384" $ expectEqual (emitInstr (I32Const 16384)) "i32.const 16384",
       scope "i32.add" $ expectEqual (emitInstr I32Add) "i32.add",
@@ -47,8 +47,8 @@ testInstructions =
       scope "i32.ge_u" $ expectEqual (emitInstr I32GeU) "i32.ge_u",
       scope "i32.wrap_i64" $ expectEqual (emitInstr I32WrapI64) "i32.wrap_i64",
       scope "i64.extend_i32_u" $ expectEqual (emitInstr I64ExtendI32U) "i64.extend_i32_u",
-      
-      -- Memory operations (Phase 3)
+
+      -- Memory operations
       scope "i32.load" $ expectEqual (emitInstr (I32Load 0)) "i32.load offset=0",
       scope "i32.load_offset" $ expectEqual (emitInstr (I32Load 8)) "i32.load offset=8",
       scope "i32.store" $ expectEqual (emitInstr (I32Store 0)) "i32.store offset=0",
@@ -56,7 +56,7 @@ testInstructions =
       scope "i64.store" $ expectEqual (emitInstr (I64Store 8)) "i64.store offset=8",
       scope "i32.load8_u" $ expectEqual (emitInstr (I32Load8U 0)) "i32.load8_u offset=0",
       scope "i32.store8" $ expectEqual (emitInstr (I32Store8 0)) "i32.store8 offset=0",
-      
+
       -- i64 operations
       scope "i64.const_0" $ expectEqual (emitInstr (I64Const 0)) "i64.const 0",
       scope "i64.const_1" $ expectEqual (emitInstr (I64Const 1)) "i64.const 1",
@@ -83,14 +83,14 @@ testInstructions =
       scope "i64.gt_s" $ expectEqual (emitInstr I64GtS) "i64.gt_s",
       scope "i64.ge_u" $ expectEqual (emitInstr I64GeU) "i64.ge_u",
       scope "i64.ge_s" $ expectEqual (emitInstr I64GeS) "i64.ge_s",
-      
+
       -- f64 operations
       scope "f64.const" $ expectEqual (emitInstr (F64Const 3.14)) "f64.const 3.14",
       scope "f64.add" $ expectEqual (emitInstr F64Add) "f64.add",
       scope "f64.sub" $ expectEqual (emitInstr F64Sub) "f64.sub",
       scope "f64.mul" $ expectEqual (emitInstr F64Mul) "f64.mul",
       scope "f64.div" $ expectEqual (emitInstr F64Div) "f64.div",
-      
+
       -- Control flow
       scope "call" $ expectEqual (emitInstr (Call "myFunc")) "call $myFunc",
       scope "return" $ expectEqual (emitInstr Return) "return",
@@ -167,7 +167,9 @@ testModule =
                   moduleGlobals = [],
                   moduleFunctions = [],
                   moduleExports = [],
-                  moduleMemoryExport = Nothing
+                  moduleMemoryExport = Nothing,
+                  moduleFuncTypes = [],
+                  moduleTableFuncs = []
                 }
         let wat = emitModule m
         expect ("(module" `isInfixOf` wat)
@@ -187,7 +189,9 @@ testModule =
                   moduleGlobals = [],
                   moduleFunctions = [func],
                   moduleExports = ["myFunc"],
-                  moduleMemoryExport = Nothing
+                  moduleMemoryExport = Nothing,
+                  moduleFuncTypes = [],
+                  moduleTableFuncs = []
                 }
         let wat = emitModule m
         expect ("export \"myFunc\"" `isInfixOf` wat)
@@ -201,7 +205,9 @@ testModule =
                   moduleGlobals = [],
                   moduleFunctions = [f1, f2],
                   moduleExports = ["f1", "f2"],
-                  moduleMemoryExport = Nothing
+                  moduleMemoryExport = Nothing,
+                  moduleFuncTypes = [],
+                  moduleTableFuncs = []
                 }
         let wat = emitModule m
         expect ("func $f1" `isInfixOf` wat)
@@ -215,7 +221,9 @@ testModule =
                   moduleGlobals = [],
                   moduleFunctions = [],
                   moduleExports = [],
-                  moduleMemoryExport = Just "memory"
+                  moduleMemoryExport = Just "memory",
+                  moduleFuncTypes = [],
+                  moduleTableFuncs = []
                 }
         let wat = emitModule m
         expect ("(memory 1)" `isInfixOf` wat)
@@ -233,10 +241,46 @@ testModule =
                   moduleGlobals = [heapPtr],
                   moduleFunctions = [],
                   moduleExports = [],
-                  moduleMemoryExport = Nothing
+                  moduleMemoryExport = Nothing,
+                  moduleFuncTypes = [],
+                  moduleTableFuncs = []
                 }
         let wat = emitModule m
         expect ("global $heap_ptr" `isInfixOf` wat)
         expect ("(mut " `isInfixOf` wat)
-        expect ("i32.const 16384" `isInfixOf` wat)
+        expect ("i32.const 16384" `isInfixOf` wat),
+      scope "with_func_table" $ do
+        let f1 = WatFunction "f1" [] [] [I64] [I64Const 1]
+            f2 = WatFunction "f2" [] [] [I64] [I64Const 2]
+        let m =
+              WatModule
+                { moduleMemory = Just 1,
+                  moduleGlobals = [],
+                  moduleFunctions = [f1, f2],
+                  moduleExports = ["f1"],
+                  moduleMemoryExport = Nothing,
+                  moduleFuncTypes = [],
+                  moduleTableFuncs = ["f1", "f2"]
+                }
+        let wat = emitModule m
+        expect ("(table 2 funcref)" `isInfixOf` wat)
+        expect ("(elem (i32.const 0) $f1 $f2)" `isInfixOf` wat),
+      scope "with_func_type" $ do
+        let ft = WatFuncType "unary_i64" [I64] [I64]
+        let m =
+              WatModule
+                { moduleMemory = Nothing,
+                  moduleGlobals = [],
+                  moduleFunctions = [],
+                  moduleExports = [],
+                  moduleMemoryExport = Nothing,
+                  moduleFuncTypes = [ft],
+                  moduleTableFuncs = []
+                }
+        let wat = emitModule m
+        expect ("(type $unary_i64 (func (param i64) (result i64)))" `isInfixOf` wat),
+      scope "call_indirect" $ do
+        -- Test that call_indirect emits correctly
+        let instr = CallIndirect "unary_i64"
+        expectEqual (emitInstr instr) "call_indirect (type $unary_i64)"
     ]

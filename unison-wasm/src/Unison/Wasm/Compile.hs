@@ -1,20 +1,24 @@
--- | SuperGroup → WAT compiler (Phase 3).
+{-# OPTIONS_GHC -Wno-incomplete-uni-patterns -fmax-pmcheck-models=100 #-}
+
+-- | SuperGroup → WAT compiler.
 --
 -- This module compiles Unison's SuperGroup intermediate representation
--- to WebAssembly Text format (WAT). Phase 3 supports:
+-- to WebAssembly Text format (WAT).
 --
+-- Supported:
 -- * Unboxed arithmetic (Nat, Int, Float operations)
 -- * Local variables (TVar)
 -- * Let bindings (TLets)
 -- * Primitive operations (TPrm)
 -- * Static function calls (TApp FComb)
--- * Full multi-case MatchIntegral/MatchNumeric
--- * Boxed values as I32 pointers (BX → I32)
+-- * Full multi-case pattern matching (MatchIntegral/MatchNumeric/MatchData for enums)
+-- * Closures and partial application (TName → PAp allocation, call_indirect)
+-- * Sum types / enums (FCon, MatchData)
 --
--- NOT supported in Phase 3 (deferred):
--- * Heap allocation for sum types (Phase 3.5)
--- * Closures/partial application (Phase 4)
--- * Abilities/handlers (Phase 5)
+-- NOT YET supported (Phase 5+):
+-- * Abilities/handlers
+-- * Data constructors with fields
+-- * Async foreign calls
 module Unison.Wasm.Compile
   ( -- * Compilation
     compileGroup,
@@ -35,7 +39,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Word (Word64)
+import Data.Word (Word32, Word64)
 import Unison.ABT.Normalized qualified as ABTN
 import Unison.Hash qualified as Hash
 import Unison.Reference (Reference)
@@ -58,9 +62,13 @@ import Unison.Runtime.ANF
     pattern TVar,
   )
 import Unison.Runtime.ANF.POp (POp (..))
+import Unison.Runtime.TypeTags (rawTag)
 import Unison.Util.EnumContainers qualified as EC
 import Unison.Var (Var)
 import Unison.Var qualified as Var
+import Unison.Wasm.ABI qualified as ABI
+import Unison.Wasm.Compile.Primitives qualified as P
+import Unison.Wasm.Compile.Runtime qualified as Runtime
 import Unison.Wasm.Emit (WatFunction (..), WatInstr (..), WatModule (..), WatValType (..))
 
 -- | Compilation errors
@@ -93,7 +101,13 @@ data CompileCtx v = CompileCtx
     -- | Map from combinator variable to function name (for mutual recursion)
     ctxFuncNames :: Map v String,
     -- | Map from Reference to function name (for lifted combinators)
-    ctxRefNames :: Map Reference String
+    ctxRefNames :: Map Reference String,
+    -- | Map from variable to function arity (for PAp creation)
+    ctxFuncArities :: Map v Int,
+    -- | Map from Reference to function arity (for lifted combinators)
+    ctxRefArities :: Map Reference Int,
+    -- | Map from Reference to function table index (for call_indirect)
+    ctxRefTableIndices :: Map Reference Int
   }
   deriving (Eq, Show)
 
@@ -106,7 +120,10 @@ emptyCtx =
       ctxLocals = [],
       ctxCurrentFunc = "",
       ctxFuncNames = Map.empty,
-      ctxRefNames = Map.empty
+      ctxRefNames = Map.empty,
+      ctxFuncArities = Map.empty,
+      ctxRefArities = Map.empty,
+      ctxRefTableIndices = Map.empty
     }
 
 -- | Look up a variable in the context
@@ -127,12 +144,13 @@ bindVars bindings ctx =
         }
 
 -- | Convert memory classification to WASM type
--- NOTE: Phase 3 keeps BX = I64 as a workaround.
--- The ANF classifier marks many unboxed values as BX. Proper I32 pointers
--- require heap allocation (Phase 3.5) and fixing the ANF output.
+--
+-- NOTE: BX (boxed) is currently treated as I64 because the ANF classifier
+-- marks many unboxed values as BX. Proper I32 pointers require fixing
+-- the ANF output and updating the K-frame implementation.
 memToValType :: Mem -> WatValType
 memToValType UN = I64 -- Unboxed: 64-bit value
-memToValType BX = I64 -- TODO(Phase 3.5): change to I32 after heap allocation works
+memToValType BX = I64 -- TODO(Phase 5): change to I32 for proper pointers
 
 -- | Generate a short function name from a Reference
 -- Uses base32hex encoding for hash, truncated for readability
@@ -172,13 +190,19 @@ compileGroup (Rec localDefs entry) exportName = do
   -- Compile the entry function
   entryFunc <- compileSuperNormalWithCtx funcNames exportName entry exportName
 
+  let allFuncs = Runtime.runtimeFunctions ++ localFuncs ++ [entryFunc]
+      -- Build function table with all user functions (not runtime helpers)
+      tableFuncs = map funcName (localFuncs ++ [entryFunc])
+
   pure
     WatModule
-      { moduleMemory = Nothing,  -- Phase 3: no heap needed for pure arithmetic
-        moduleGlobals = [],
-        moduleFunctions = localFuncs ++ [entryFunc],
+      { moduleMemory = Just 1, -- 1 page (64KB) for heap
+        moduleGlobals = Runtime.runtimeGlobals,
+        moduleFunctions = allFuncs,
         moduleExports = [exportName],
-        moduleMemoryExport = Nothing
+        moduleMemoryExport = Just "memory",
+        moduleFuncTypes = Runtime.runtimeFuncTypes,
+        moduleTableFuncs = tableFuncs
       }
 
 -- | Compile a SuperGroup along with its lambda-lifted combinators
@@ -195,45 +219,76 @@ compileGroupWithLifted (Rec localDefs entry) liftedGroups exportName = do
   -- Build a map from Reference to function name for all lifted combinators
   let refNames = Map.fromList [(ref, refToFuncName ref) | (ref, _) <- liftedGroups]
 
+  -- Build a map from Reference to arity for all lifted combinators
+  let refArities = Map.fromList [(ref, superGroupArity sg) | (ref, sg) <- liftedGroups]
+
+  -- Build a map from Reference to table index
+  -- Table order: liftedFuncs, then localFuncs, then entryFunc
+  -- Each lifted group may produce multiple functions, but we only index the entry
+  let refTableIndices = Map.fromList $ zip (map fst liftedGroups) [0..]
+
   -- Compile lifted combinators first
-  liftedFuncs <- concat <$> mapM (compileLiftedGroup refNames) liftedGroups
+  liftedFuncs <- concat <$> mapM (compileLiftedGroup refNames refArities refTableIndices) liftedGroups
 
   -- Build function name map for local definitions in the main group
   let funcNames = Map.fromList [(v, Text.unpack (Var.name v)) | (v, _) <- localDefs]
 
+  -- Build arity map for local definitions
+  let funcArities = Map.fromList [(v, superNormalArity sn) | (v, sn) <- localDefs]
+
   -- Compile local definitions from the main group (if any)
-  localFuncs <- mapM (compileLocalDefWithRefCtx funcNames refNames exportName) localDefs
+  localFuncs <- mapM (compileLocalDefWithRefCtx funcNames funcArities refNames refArities refTableIndices exportName) localDefs
 
   -- Compile the entry function with reference context (so it can call lifted combinators)
-  entryFunc <- compileSuperNormalWithRefCtx funcNames refNames exportName entry exportName
+  entryFunc <- compileSuperNormalWithRefCtx funcNames funcArities refNames refArities refTableIndices exportName entry exportName
 
-  -- Merge: lifted functions + local functions + entry
+  -- Merge: runtime + lifted functions + local functions + entry
+  let allFuncs = Runtime.runtimeFunctions ++ liftedFuncs ++ localFuncs ++ [entryFunc]
+      -- Build function table with all user functions (for call_indirect)
+      userFuncs = liftedFuncs ++ localFuncs ++ [entryFunc]
+      tableFuncs = map funcName userFuncs
+
   pure
     WatModule
-      { moduleMemory = Nothing,  -- Phase 3: no heap needed for pure arithmetic
-        moduleGlobals = [],
-        moduleFunctions = liftedFuncs ++ localFuncs ++ [entryFunc],
+      { moduleMemory = Just 1, -- 1 page (64KB) for heap
+        moduleGlobals = Runtime.runtimeGlobals,
+        moduleFunctions = allFuncs,
         moduleExports = [exportName],
-        moduleMemoryExport = Nothing
+        moduleMemoryExport = Just "memory",
+        moduleFuncTypes = Runtime.runtimeFuncTypes,
+        moduleTableFuncs = tableFuncs
       }
+
+-- | Get the arity of a SuperGroup (from its entry point)
+superGroupArity :: SuperGroup ref v -> Int
+superGroupArity (Rec _ entry) = superNormalArity entry
+
+-- | Get the arity of a SuperNormal (length of conventions list)
+superNormalArity :: SuperNormal ref v -> Int
+superNormalArity (Lambda mems _) = length mems
 
 -- | Compile a lifted combinator SuperGroup
 compileLiftedGroup ::
   (Var v) =>
   Map Reference String ->
+  Map Reference Int ->
+  Map Reference Int ->  -- table indices
   (Reference, SuperGroup Reference v) ->
   CompileResult [WatFunction]
-compileLiftedGroup refNames (ref, Rec localDefs entry) = do
+compileLiftedGroup refNames refArities refTableIndices (ref, Rec localDefs entry) = do
   let funcName = maybe (refToFuncName ref) id (Map.lookup ref refNames)
 
   -- Build function name map for local definitions
   let funcNames = Map.fromList [(v, Text.unpack (Var.name v)) | (v, _) <- localDefs]
 
+  -- Build arity map for local definitions
+  let funcArities = Map.fromList [(v, superNormalArity sn) | (v, sn) <- localDefs]
+
   -- Compile local definitions
-  localFuncs <- mapM (compileLocalDefWithRefCtx funcNames refNames funcName) localDefs
+  localFuncs <- mapM (compileLocalDefWithRefCtx funcNames funcArities refNames refArities refTableIndices funcName) localDefs
 
   -- Compile entry with reference context
-  entryFunc <- compileSuperNormalWithRefCtx funcNames refNames funcName entry funcName
+  entryFunc <- compileSuperNormalWithRefCtx funcNames funcArities refNames refArities refTableIndices funcName entry funcName
 
   pure $ localFuncs ++ [entryFunc]
 
@@ -241,30 +296,39 @@ compileLiftedGroup refNames (ref, Rec localDefs entry) = do
 compileLocalDefWithRefCtx ::
   (Var v) =>
   Map v String ->
+  Map v Int ->
   Map Reference String ->
+  Map Reference Int ->
+  Map Reference Int ->  -- table indices
   String ->
   (v, SuperNormal Reference v) ->
   CompileResult WatFunction
-compileLocalDefWithRefCtx funcNames refNames currentFunc (v, sn) = do
+compileLocalDefWithRefCtx funcNames funcArities refNames refArities refTableIndices currentFunc (v, sn) = do
   let name = Text.unpack (Var.name v)
-  compileSuperNormalWithRefCtx funcNames refNames currentFunc sn name
+  compileSuperNormalWithRefCtx funcNames funcArities refNames refArities refTableIndices currentFunc sn name
 
 -- | Compile a SuperNormal with reference context (for lifted combinators)
 compileSuperNormalWithRefCtx ::
   (Var v) =>
   Map v String ->
+  Map v Int ->
   Map Reference String ->
+  Map Reference Int ->
+  Map Reference Int ->  -- table indices
   String ->
   SuperNormal Reference v ->
   String ->
   CompileResult WatFunction
-compileSuperNormalWithRefCtx funcNames refNames currentFunc (Lambda mems body) name = do
+compileSuperNormalWithRefCtx funcNames funcArities refNames refArities refTableIndices currentFunc (Lambda mems body) name = do
   -- Extract parameter variables and get the inner body
   let (paramVars, innerBody) = unabss body
       baseCtx = emptyCtx
         { ctxCurrentFunc = currentFunc,
           ctxFuncNames = funcNames,
-          ctxRefNames = refNames
+          ctxRefNames = refNames,
+          ctxFuncArities = funcArities,
+          ctxRefArities = refArities,
+          ctxRefTableIndices = refTableIndices
         }
       -- Only bind as many parameters as we have conventions for
       ctx = bindVars (zip (take (length mems) paramVars) mems) baseCtx
@@ -273,7 +337,8 @@ compileSuperNormalWithRefCtx funcNames refNames currentFunc (Lambda mems body) n
   (bodyInstrs, finalCtx) <- compileANormalWithCtx ctx innerBody
 
   let funcParams = [("p" ++ show i, I64) | i <- [0 .. length mems - 1]]
-      funcLocals' = drop (length mems) (ctxLocals finalCtx)
+      -- Add __pap_temp for partial application handling
+      funcLocals' = drop (length mems) (ctxLocals finalCtx) ++ [("__pap_temp", I32)]
       funcResults = [I64]
 
   pure
@@ -325,7 +390,7 @@ compileSuperNormalWithCtx funcNames _currentFunc (Lambda mems body) name = do
   let funcParams = [("p" ++ show i, I64) | i <- [0 .. length mems - 1]]
       -- Locals are all variables bound after the parameters
       funcLocals' = drop (length mems) (ctxLocals finalCtx)
-      funcResults = [I64] -- Phase 3: always returns i64
+      funcResults = [I64] -- All functions return i64 (boxed values or unboxed integers)
 
   pure
     WatFunction
@@ -427,14 +492,16 @@ compileANormal ctx (TPrm op args) = do
   pure $ argInstrs ++ [opInstr]
 
 -- Static function call (FComb) - handle builtins specially
+-- Also handles partial application when args.length < arity
 compileANormal ctx (TApp (FComb ref) args) = do
   -- Compile arguments
   argInstrs <- concat <$> mapM (compileANormal ctx . TVar) args
+  let numArgs = length args
   case ref of
     -- Builtin references: map to primitive operations
     Reference.Builtin name -> do
       -- Try to map builtin to primitive op
-      case builtinToPrimOp name (length args) of
+      case builtinToPrimOp name numArgs of
         Just opInstr -> pure $ argInstrs ++ [opInstr]
         Nothing ->
           -- Unknown builtin - fall back to function call if we have a name
@@ -444,21 +511,71 @@ compileANormal ctx (TApp (FComb ref) args) = do
     -- Derived reference: look up in refNames for lifted combinators
     Reference.DerivedId _ -> do
       case Map.lookup ref (ctxRefNames ctx) of
-        Just funcName -> pure $ argInstrs ++ [Call funcName]
+        Just funcName -> do
+          -- Check if this is a partial application
+          case Map.lookup ref (ctxRefArities ctx) of
+            Just arity | numArgs < arity ->
+              -- Partial application: create a PAp and store args
+              -- Use table index for call_indirect
+              let tableIdx = Map.lookup ref (ctxRefTableIndices ctx)
+              in case tableIdx of
+                   Just idx -> do
+                     -- Allocate PAp, store captured args, then convert to i64
+                     -- Use __pap_temp local (must be declared in the function)
+                     let tempName = "__pap_temp"
+                     storeInstrs <- storePApArgs ctx tempName 0 args
+                     pure $
+                       -- Don't use argInstrs - we read from locals in storePApArgs
+                       [ I32Const (fromIntegral idx)
+                       , I32Const (fromIntegral arity)
+                       , I32Const (fromIntegral numArgs)
+                       , Call "__alloc_pap"
+                       , LocalSet tempName  -- Store PAp pointer
+                       ]
+                       ++ storeInstrs  -- Store captured args
+                       ++ [LocalGet tempName, I64ExtendI32U]  -- Get pointer and extend to i64
+                   Nothing ->
+                     Left $ UnsupportedConstruct $ "No table index for reference in partial application"
+            _ ->
+              -- Full application: direct call
+              pure $ argInstrs ++ [Call funcName]
         Nothing ->
           -- Not found in refNames - might be self-recursion
           let funcName = if null (ctxCurrentFunc ctx) then "target" else ctxCurrentFunc ctx
            in pure $ argInstrs ++ [Call funcName]
 
--- Function variable call (FVar) - call local combinator
+-- Function variable call (FVar) - call local combinator or PAp
 compileANormal ctx (TApp (FVar v) args) = do
   -- Look up the function name in the context
   case Map.lookup v (ctxFuncNames ctx) of
     Just funcName -> do
+      -- Known combinator - direct call
       argInstrs <- concat <$> mapM (compileANormal ctx . TVar) args
       pure $ argInstrs ++ [Call funcName]
     Nothing ->
-      Left $ UnsupportedConstruct "FVar to unknown combinator (closures not supported in Phase 3)"
+      -- Not a known combinator - must be a local variable holding a PAp
+      case lookupVar v ctx of
+        Just (localIdx, _) -> do
+          -- This is a local variable holding a PAp pointer
+          -- We need to dynamically dispatch: load captured args + new args, then call_indirect
+          argInstrs <- concat <$> mapM (compileANormal ctx . TVar) args
+          let numNewArgs = length args
+              papLocal = "p" ++ show localIdx
+          -- Generate code to invoke the PAp with new arguments
+          pure $ compileApplyPAp papLocal numNewArgs argInstrs
+        Nothing ->
+          Left $ UnboundVariable (Var.name v)
+
+-- Data constructor application (FCon) - create enum/data values
+-- For enums (no fields), just return the tag as i64
+-- For data with fields, would need heap allocation (not yet implemented)
+compileANormal _ctx (TApp (FCon _ref tag) []) = do
+  -- Enum type: just return the constructor tag as i64
+  pure [I64Const (rawTag tag)]
+
+compileANormal _ctx (TApp (FCon _ref _tag) _args) = do
+  -- Data type with fields requires heap allocation (not yet supported)
+  Left $ UnsupportedConstruct "Data constructors with fields not yet supported"
 
 -- Pattern match on integral values (MatchIntegral)
 compileANormal ctx (TMatch v (MatchIntegral cases defaultCase)) = do
@@ -469,23 +586,125 @@ compileANormal ctx (TMatch v (MatchIntegral cases defaultCase)) = do
 compileANormal ctx (TMatch v (MatchNumeric _ref cases defaultCase)) = do
   compileIntegralMatch ctx v (EC.mapToList cases) defaultCase
 
--- TName: bind a closure (not supported in Phase 3)
-compileANormal _ctx (TName _ _ _ _) = do
-  Left $ UnsupportedConstruct "TName (closures) not supported in Phase 3"
+-- Pattern match on data types (MatchData) - sum type dispatch
+-- For enums (no fields), dispatch on the tag value
+compileANormal ctx (TMatch v (MatchData _ref cases defaultCase)) = do
+  -- Convert MatchData cases to integral-style cases
+  -- Each case is (CTag, ([Mem], body)) - for enums, [Mem] is empty
+  let integralCases = [(rawTag tag, body) | (tag, ([], body)) <- EC.mapToList cases]
+  -- Check if any case has fields (not supported yet)
+  let casesWithFields = [(tag, mems) | (tag, (mems, _)) <- EC.mapToList cases, not (null mems)]
+  if not (null casesWithFields)
+    then Left $ UnsupportedConstruct "MatchData with field bindings not yet supported"
+    else compileIfElseChain ctx v integralCases defaultCase
+
+-- TName: bind a closure to a variable
+-- TName v f as body: create PAp for function f with captured args as, bind to v, execute body
+compileANormal ctx (TName v f args bo) = do
+  -- Get function table index and arity
+  (tableIdx, arity) <- case f of
+    Left ref ->
+      case (Map.lookup ref (ctxRefTableIndices ctx), Map.lookup ref (ctxRefArities ctx)) of
+        (Just idx, Just a) -> pure (idx, a)
+        (Nothing, _) -> Left $ UnsupportedConstruct $ "No table index for reference in TName"
+        (_, Nothing) -> Left $ UnsupportedConstruct $ "Unknown arity for reference in TName"
+    Right funcVar ->
+      -- For local function variables, we don't have table indices yet
+      -- This would require extending ctxFuncTableIndices
+      case Map.lookup funcVar (ctxFuncArities ctx) of
+        Just a -> pure (varToFuncId funcVar, a)  -- Fallback to hash for now
+        Nothing -> Left $ UnsupportedConstruct $ "TName with unknown function variable"
+
+  let capturedCount = length args
+      -- Create the local variable for the PAp pointer
+      localName = "p" ++ show (ctxNextLocal ctx)
+      newCtx = ctx
+        { ctxVars = Map.insert v (ctxNextLocal ctx, BX) (ctxVars ctx),
+          ctxNextLocal = ctxNextLocal ctx + 1,
+          ctxLocals = ctxLocals ctx ++ [(localName, I32)]  -- PAp pointer is i32
+        }
+
+  -- Compile the body with the new binding
+  bodyInstrs <- compileANormal newCtx bo
+
+  -- Generate PAp allocation
+  let allocInstrs =
+        [ -- Allocate PAp: __alloc_pap(table_idx, arity, captured_count)
+          I32Const (fromIntegral tableIdx),
+          I32Const (fromIntegral arity),
+          I32Const (fromIntegral capturedCount),
+          Call "__alloc_pap",
+          LocalSet localName
+        ]
+
+  -- Store captured arguments into the PAp (reads from existing locals)
+  storeInstrs <- storePApArgs ctx localName 0 args
+
+  pure $ allocInstrs ++ storeInstrs ++ bodyInstrs
 
 -- Fallback for unsupported constructs
 compileANormal _ctx _term = do
-  Left $ UnsupportedConstruct "Unsupported ANormal construct in Phase 3"
+  Left $ UnsupportedConstruct "Unsupported ANormal construct in Phase 4"
 
 --------------------------------------------------------------------------------
--- Pattern Matching (Phase 3: Full multi-case support)
+-- PAp Helper Functions
+--------------------------------------------------------------------------------
+
+-- | Store captured arguments into a PAp object.
+--
+-- Each argument is stored as a TypedSlot (16 bytes): TypeTag + Payload64.
+storePApArgs ::
+  (Var v) =>
+  CompileCtx v ->
+  String ->           -- PAp pointer local name
+  Int ->              -- Current argument index
+  [v] ->              -- Remaining arguments to store
+  CompileResult [WatInstr]
+storePApArgs _ _ _ [] = pure []
+storePApArgs ctx ptrName idx (arg : rest) = do
+  case lookupVar arg ctx of
+    Nothing -> Left $ UnboundVariable $ Var.name arg
+    Just (localIdx, mem) -> do
+      let offset = fromIntegral ABI.pApArgsOffset + fromIntegral idx * fromIntegral ABI.typedSlotSize
+          argLocalName = "p" ++ show localIdx
+          typeTag = memToTypeTag mem
+
+      -- Store TypeTag at offset
+      let storeTag =
+            [ LocalGet ptrName,
+              I32Const (fromIntegral typeTag),
+              I32Store offset
+            ]
+
+      -- Store value at offset + 8
+      let storeVal =
+            [ LocalGet ptrName,
+              LocalGet argLocalName,
+              I64Store (offset + 8)
+            ]
+
+      restInstrs <- storePApArgs ctx ptrName (idx + 1) rest
+      pure $ storeTag ++ storeVal ++ restInstrs
+
+-- | Convert memory classification to TypeTag
+memToTypeTag :: Mem -> Word32
+memToTypeTag UN = fromIntegral $ ABI.typeTagToWord8 ABI.typeNat
+memToTypeTag BX = fromIntegral $ ABI.typeTagToWord8 ABI.typeBoxed
+
+-- | Helper to get a numeric function ID from a variable
+-- Used as fallback when table index isn't available
+varToFuncId :: (Var v) => v -> Int
+varToFuncId v = fromIntegral $ Text.length (Var.name v)
+
+--------------------------------------------------------------------------------
+-- Pattern Matching
 --------------------------------------------------------------------------------
 
 -- | Compile MatchIntegral/MatchNumeric with full multi-case support
 --
--- Phase 3 improves on Phase 2 by supporting an arbitrary number of cases
--- using an if-else chain. Each case compares the scrutinee against a value
--- and branches to the appropriate body.
+-- Supports an arbitrary number of cases using an if-else chain.
+-- Each case compares the scrutinee against a value and branches
+-- to the appropriate body.
 compileIntegralMatch ::
   (Var v) =>
   CompileCtx v ->
@@ -552,6 +771,161 @@ compileIfElseChain ctx scrutVar ((caseVal, body):rest) mDefault = do
       ++ [If I64 thenInstrs elseInstrs]
 
 --------------------------------------------------------------------------------
+-- PAp Invocation (Dynamic Dispatch)
+--------------------------------------------------------------------------------
+
+-- | Generate code to apply arguments to a PAp (closure).
+--
+-- Strategy:
+-- 1. Check if capturedCount + numNewArgs < expectedArity (partial application)
+-- 2. If partial: create new PAp with additional captured args
+-- 3. If saturated: dispatch via call_indirect based on capturedCount
+--
+-- Note: The papLocal contains an i64 (boxed pointer), but memory operations
+-- need i32. We wrap it with i32.wrap_i64.
+--
+-- All offsets use ABI constants from 'Unison.Wasm.ABI'.
+compileApplyPAp :: String -> Int -> [WatInstr] -> [WatInstr]
+compileApplyPAp papLocal numNewArgs argInstrs =
+  let
+    -- ABI constants (avoid magic numbers)
+    funcRefOffset :: Word32
+    funcRefOffset = fromIntegral ABI.pApFuncRefOffset
+
+    arityOffset :: Word32
+    arityOffset = fromIntegral ABI.pApExpectedArityOffset
+
+    capturedCountOffset :: Word32
+    capturedCountOffset = fromIntegral ABI.pApCapturedCountOffset
+
+    argsBaseOffset :: Word32
+    argsBaseOffset = fromIntegral ABI.pApArgsOffset
+
+    -- Get PAp pointer as i32 from the i64 boxed value
+    getPapPtr :: [WatInstr]
+    getPapPtr = [LocalGet papLocal] ++ P.wrapI64ToPtr
+
+    -- Read PAp fields using ABI offsets
+    readFuncId :: [WatInstr]
+    readFuncId = getPapPtr ++ [I32Load funcRefOffset]
+
+    readExpectedArity :: [WatInstr]
+    readExpectedArity = getPapPtr ++ [I32Load16U arityOffset]
+
+    readCapturedCount :: [WatInstr]
+    readCapturedCount = getPapPtr ++ [I32Load16U capturedCountOffset]
+
+    -- Load captured arg payload at index i
+    -- Offset = argsBaseOffset + i * slotSize + 8 (skip TypeTag)
+    loadCapturedArg :: Int -> [WatInstr]
+    loadCapturedArg i =
+      getPapPtr ++ [I64Load (P.slotPayloadOffset argsBaseOffset (fromIntegral i))]
+
+    -- Generate code for a specific capturedCount when fully saturated
+    genSaturatedCase :: Int -> [WatInstr]
+    genSaturatedCase cc =
+      let totalArity = cc + numNewArgs
+       in concatMap loadCapturedArg [0 .. cc - 1]
+            ++ argInstrs
+            ++ readFuncId
+            ++ [CallIndirect (Runtime.arityTypeName totalArity)]
+
+    -- Check: capturedCount + numNewArgs < expectedArity?
+    checkPartial :: [WatInstr]
+    checkPartial =
+      readCapturedCount
+        ++ [I32Const (fromIntegral numNewArgs), I32Add]
+        ++ readExpectedArity
+        ++ [I32LtU]
+
+    -- Generate code for partial application (return new PAp)
+    genPartialCase :: [WatInstr]
+    genPartialCase =
+      -- Allocate new PAp: __alloc_pap(func_id, expected_arity, new_captured_count)
+      readFuncId
+        ++ readExpectedArity
+        ++ readCapturedCount
+        ++ [I32Const (fromIntegral numNewArgs), I32Add]
+        ++ [Call "__alloc_pap", LocalSet "__pap_temp"]
+        ++ genCopyOldArgs
+        ++ genStoreNewArgs
+        ++ [LocalGet "__pap_temp"]
+        ++ P.extendPtrToI64
+
+    -- Copy old captured args using dispatch on count
+    genCopyOldArgs :: [WatInstr]
+    genCopyOldArgs = buildCopyDispatch 0
+
+    buildCopyDispatch :: Int -> [WatInstr]
+    buildCopyDispatch n
+      | n >= Runtime.maxSupportedArity = []
+      | n == 0 =
+          -- Special case: if capturedCount == 0, nothing to copy
+          readCapturedCount
+            ++ [I32Const 0, I32Eq, IfVoid [] (buildCopyDispatch 1)]
+      | otherwise =
+          readCapturedCount
+            ++ [ I32Const (fromIntegral n),
+                 I32Eq,
+                 IfVoid
+                   (concatMap copyOneArg [0 .. n - 1])
+                   (buildCopyDispatch (n + 1))
+               ]
+
+    -- Copy one arg at index i from old PAp to new PAp
+    -- Uses inline pointer generation (no extra local needed)
+    copyOneArg :: Int -> [WatInstr]
+    copyOneArg i =
+      let offset = P.slotPayloadOffset argsBaseOffset (fromIntegral i)
+       in [ LocalGet "__pap_temp" -- dest: new PAp
+          ]
+            ++ getPapPtr -- src: old PAp pointer
+            ++ [ I64Load offset, -- load from old PAp
+                 I64Store offset -- store to new PAp at same position
+               ]
+
+    -- Store new arguments at position = old capturedCount
+    genStoreNewArgs :: [WatInstr]
+    genStoreNewArgs
+      | numNewArgs == 1 = buildStoreDispatch 0
+      | otherwise = [] -- TODO: handle multiple new args
+
+    buildStoreDispatch :: Int -> [WatInstr]
+    buildStoreDispatch n
+      | n >= Runtime.maxSupportedArity = []
+      | otherwise =
+          let offset = P.slotPayloadOffset argsBaseOffset (fromIntegral n)
+           in readCapturedCount
+                ++ [ I32Const (fromIntegral n),
+                     I32Eq,
+                     IfVoid
+                       ([LocalGet "__pap_temp"] ++ argInstrs ++ [I64Store offset])
+                       (buildStoreDispatch (n + 1))
+                   ]
+
+    -- Build saturated dispatch using recursive helper
+    buildSaturatedSwitch :: [WatInstr]
+    buildSaturatedSwitch = buildSaturatedDispatch 0
+
+    buildSaturatedDispatch :: Int -> [WatInstr]
+    buildSaturatedDispatch cc
+      | cc + numNewArgs > Runtime.maxSupportedArity = [Unreachable]
+      | cc + numNewArgs == Runtime.maxSupportedArity = genSaturatedCase cc
+      | otherwise =
+          readCapturedCount
+            ++ [ I32Const (fromIntegral cc),
+                 I32Eq,
+                 If I64 (genSaturatedCase cc) (buildSaturatedDispatch (cc + 1))
+               ]
+
+    -- Full dispatch: check if partial, then branch
+    fullDispatch :: [WatInstr]
+    fullDispatch =
+      checkPartial
+        ++ [If I64 genPartialCase buildSaturatedSwitch]
+   in fullDispatch
+
+--------------------------------------------------------------------------------
 -- Literal Compilation
 --------------------------------------------------------------------------------
 
@@ -561,9 +935,9 @@ compileLit (N n) = pure [I64Const n]
 compileLit (I n) = pure [I64Const (fromIntegral n)]
 compileLit (F f) = pure [F64Const f]
 compileLit (C c) = pure [I64Const (fromIntegral (fromEnum c))]  -- Unicode codepoint as i64
-compileLit (T _t) = Left $ UnsupportedConstruct "Text literals require heap allocation (Phase 3.5)"
-compileLit (LM _) = Left $ UnsupportedConstruct "Term links require heap allocation (Phase 3.5)"
-compileLit (LY _) = Left $ UnsupportedConstruct "Type links require heap allocation (Phase 3.5)"
+compileLit (T _t) = Left $ UnsupportedConstruct "Text literals not yet supported"
+compileLit (LM _) = Left $ UnsupportedConstruct "Term links not yet supported"
+compileLit (LY _) = Left $ UnsupportedConstruct "Type links not yet supported"
 
 --------------------------------------------------------------------------------
 -- Primitive Operation Compilation
@@ -577,8 +951,8 @@ compilePrimOp SUBN 2 = pure I64Sub
 compilePrimOp MULN 2 = pure I64Mul
 compilePrimOp DIVN 2 = pure I64DivU
 compilePrimOp MODN 2 = pure I64RemU
-compilePrimOp INCN 1 = pure I64Add -- Need to push 1 first
-compilePrimOp DECN 1 = pure I64Sub -- Need to push 1 first
+compilePrimOp INCN 1 = pure I64Add -- Caller pushes 1; we just emit add
+compilePrimOp DECN 1 = pure I64Sub -- Caller pushes 1; we just emit sub
 compilePrimOp LEQN 2 = pure I64LeU
 compilePrimOp LESN 2 = pure I64LtU
 compilePrimOp EQLN 2 = pure I64Eq
@@ -593,7 +967,7 @@ compilePrimOp LEQI 2 = pure I64LeS
 compilePrimOp LESI 2 = pure I64LtS
 compilePrimOp EQLI 2 = pure I64Eq
 compilePrimOp NEQI 2 = pure I64Ne
-compilePrimOp NEGI 1 = pure I64Sub  -- Uses 0 - x pattern
+compilePrimOp NEGI 1 = pure I64Sub -- Caller pushes 0; we emit sub for (0 - x)
 -- Float operations
 compilePrimOp ADDF 2 = pure F64Add
 compilePrimOp SUBF 2 = pure F64Sub

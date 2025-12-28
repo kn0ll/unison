@@ -4,8 +4,8 @@
  * These tests verify that the JS runtime correctly implements the ABI
  * specified in plans/WASM_ABI.md.
  *
- * Phase 0 requirement: All tests must pass before any Haskell compiler
- * code is written.
+ * These tests must stay in sync with the Haskell ABI constants in
+ * Unison.Wasm.ABI and the TypeScript constants in abi-constants.ts.
  */
 
 import { describe, it, before } from 'node:test';

@@ -132,16 +132,6 @@ testArithmetic =
             expect ("i64.sub" `isInfixOf` wat)
     ]
 
--- NOTE: The following tests are disabled for now because the current
--- Phase 2 compiler has limitations:
---
--- 1. `let` bindings: "let x = 42; x" fails with "free variables in supercombinator"
---    This appears to be a lamLift/parsing environment issue
---
--- 2. Pattern matching: Multi-branch MatchIntegral fails with "branch exhaustion"
---    This is documented as a Phase 2 shortcut (single-case only)
---
--- 3. Recursion: Requires pattern matching which has the above limitation
---
--- These features should be tested after Phase 3 addresses these limitations.
--- For now, the JavaScript tests cover the factorial (using pre-generated WAT).
+-- NOTE: These unit tests cover IR generation.
+-- For comprehensive end-to-end tests including pattern matching, recursion,
+-- closures, and sum types, see Integration.hs which runs the generated WAT.

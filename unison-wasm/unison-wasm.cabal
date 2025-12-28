@@ -19,6 +19,8 @@ library
   exposed-modules:
       Unison.Wasm.ABI
       Unison.Wasm.Compile
+      Unison.Wasm.Compile.Primitives
+      Unison.Wasm.Compile.Runtime
       Unison.Wasm.Emit
   hs-source-dirs:
       src

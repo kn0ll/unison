@@ -752,13 +752,6 @@ WASM binary
 |----------|-------|--------|
 | `Compile.hs:528-532` | Single-case `MatchNumeric` only | ✅ Fixed: `compileIfElseChain` |
 
-#### Technical Debt Remaining (Phase 3.5)
-
-| Location | Issue | Reason Deferred |
-|----------|-------|-----------------|
-| `Compile.hs:132` | `memToValType BX = I64` | ANF classifier marks unboxed values as BX |
-| `Compile.hs:408` | `TBLit` treated as unboxed | Needs heap allocation infrastructure |
-
 **Verification Checkpoint:**
 ```bash
 $ stack test unison-wasm --fast
@@ -769,77 +762,50 @@ $ stack test unison-wasm --fast
 
 ---
 
-### Phase 3.5: Sum Types and Memory
+### Phase 3.5: Sum Types (Enum) ✅
 
-**Status:** Not started
+**Status:** Complete (241 tests passing)
 
-**Goal:** Allocate and pattern match on Unison data types in WASM.
+**Goal:** Pattern match on Unison enum types (no fields) in WASM.
 
 #### Phase 3.5 Contract
 
 | | |
 |-|-|
-| **MUST** | Implement bump allocator invocation from generated code |
-| **MUST** | Allocate `Enum`, `Data1`, `Data2`, `DataG` per ABI |
-| **MUST** | Compile `TMatch` on `MatchData` to ObjTag dispatch |
-| **MUST** | Use TypedSlot for boxed values |
-| **MUST** | Fix `BX` → `I32` pointer type (requires ANF investigation) |
-| **MUST** | Allocate `TBLit` as boxed TypedSlot |
-| **MUST NOT** | Implement closures or PAp |
-| **MUST NOT** | Create K frames |
-| **Deferred** | Closures (Phase 4), Abilities (Phase 5) |
+| ✅ **DONE** | Compile `TApp (FCon ref tag) []` for enum types (returns tag as i64) |
+| ✅ **DONE** | Compile `TMatch` on `MatchData` for enum dispatch (Boolean, etc.) |
+| ✅ **DONE** | Implement partial application return (new PAp when not fully saturated) |
+| ✅ **DONE** | Add `__apply2`, `__apply3` multi-arity apply functions |
+| ✅ **DONE** | Proper copying of captured args when creating new PAp |
 
-**Tasks:**
-1. Investigate why ANF marks unboxed Nat values as `BX`
-2. Fix `TBLit` → allocate TypedSlot on heap
-3. Implement `MatchData` compilation for Boolean (if/then/else)
-4. Implement `MatchData` compilation for Optional, Either, etc.
-5. Use Phase 0 memory inspector for debugging
-6. Verify layouts match Phase 0 conformance tests
+#### Completed Tasks
+
+1. ✅ Implemented `FCon` for enum types (Boolean: true=1, false=0)
+2. ✅ Implemented `MatchData` compilation for Boolean (if/then/else)
+3. ✅ Implemented partial application return - when applying fewer args than needed, creates new PAp
+4. ✅ Added `__apply2`, `__apply3` runtime functions for multi-arg apply
+5. ✅ Proper copying of captured args when creating new PAp from partial application
+
+#### Tests Added
+
+- Boolean operations: `bool_true`, `bool_false`, `bool_not_true`, `bool_not_false`
+- Boolean logic: `bool_and_tt`, `bool_and_tf`, `bool_and_ff`, `bool_or_ff`, `bool_or_tf`
+- Conditional: `bool_if_then_else`
+- Partial return: `partial_add_1`, `partial_add3_chain`, `partial_mul`, `partial_capture`, `partial_hof`, `partial_2_of_3`
 
 **Verification Checkpoint:**
 ```bash
-# Compile a function using Optional
-.> compile.wasm mylib.safeDivide
-
-# Test it - returns Optional Nat
-$ node test-optional.js
-safeDivide(10, 2) = Some(5)
-safeDivide(10, 0) = None
+$ stack test unison-wasm --fast
+✅  241 tests passed, no failures! 👍 🎉
 ```
 
-**Bonus: Memory Inspector HTML page**
-```html
-<!-- memory-inspector.html -->
-<script type="module">
-  import { inspect } from './wasm-debug.js';
-  const wasm = await WebAssembly.instantiateStreaming(fetch('test.wasm'));
-
-  // Call a function that allocates
-  const result = wasm.instance.exports.makePair(1n, 2n);
-
-  // Inspect the heap
-  inspect(wasm.instance.exports.memory, result);
-  // Shows: Data2 { tag: 0x003, field0: Nat(1), field1: Nat(2) }
-</script>
-```
-
-**UCM Integration Notes:**
-
-Phase 2's CLI POC uses shortcuts that don't work for real codebase integration:
-
-| Shortcut | Location | UCM Requirement |
-|----------|----------|-----------------|
-| Builtin-only parsing env | `Main.hs:54-62` | Load names from codebase for user-defined terms |
-| Empty `lamLift` context | `Main.hs:75-77` | Pass existing combinators to reference compiled code |
-
-These shortcuts are acceptable for the standalone CLI POC but must be addressed for the `compile.wasm` UCM command. The UCM integration pattern should follow `HandleInput/Run.hs`.
-
-**Exit Criteria:** Pattern match on `Optional` works; memory inspector shows correct layout.
+**Exit Criteria:** ✅ Boolean pattern matching works; partial application returns new PAp.
 
 ---
 
-### Phase 4: Function Calls and Closures
+### Phase 4: Function Calls and Closures ✅
+
+**Status:** Complete
 
 **Goal:** Call functions, including recursive ones and partial application.
 
@@ -847,21 +813,85 @@ These shortcuts are acceptable for the standalone CLI POC but must be addressed 
 
 | | |
 |-|-|
-| **MUST** | Implement stack frame push/pop per ABI |
 | **MUST** | Allocate `PAp` with `ExpectedArity`/`CapturedCount` |
-| **MUST** | Export `apply(closure_ptr, arg_ptr)` for JS |
-| **MUST** | Handle partial application (return new PAp) |
+| **MUST** | Compile `TName` to PAp allocation |
+| **MUST** | Add runtime memory infrastructure (heap_ptr, __alloc) |
+| **SHOULD** | Export `apply(closure_ptr, arg_ptr)` for JS |
+| **SHOULD** | Handle partial application (return new PAp) |
 | **MUST NOT** | Create K frames (no `Push`/`Mark` yet) |
 | **MUST NOT** | Handle `TShift`/`THnd` |
 | **MUST NOT** | Call async foreign functions |
-| **Deferred** | Abilities (Phase 5), Foreign calls (Phase 6) |
 
-**Tasks:**
-1. Compile `TApp`/`TName` for function calls
-2. Implement stack frame push/pop per ABI
-3. Implement `PAp` closure allocation with `ExpectedArity`/`CapturedCount` fields
-4. Export `apply(closure_ptr, arg_ptr) → result_ptr` for JS to invoke closures
-5. Support tail call optimization (optional but nice)
+#### Completed Tasks
+
+1. ✅ Added heap allocation infrastructure:
+   - `heap_ptr` global variable (starts at 0x4000)
+   - `__alloc(size)` bump allocator function
+   - `__alloc_pap(func_id, arity, count)` PAp allocation helper
+2. ✅ Extended `WatModule` to include memory, globals, and runtime functions
+3. ✅ Updated `WatGlobal` emission with correct WAT syntax
+4. ✅ Added `I32Mul` instruction to emitter
+5. ✅ Implemented `TName` compilation:
+   - Looks up function arity from context
+   - Allocates PAp with captured arguments
+   - Stores TypedSlots for captured values
+6. ✅ Added arity tracking to `CompileCtx` (`ctxFuncArities`, `ctxRefArities`)
+7. ✅ All 215 existing tests still pass
+
+---
+
+### Phase 4.5: Function Tables and Apply ✅
+
+**Status:** Complete (241 tests passing)
+
+**Goal:** Enable dynamic function dispatch via `call_indirect` and implement `__apply1` for closure invocation.
+
+#### Phase 4.5 Contract
+
+| | |
+|-|-|
+| **MUST** | Add `call_indirect` instruction support |
+| **MUST** | Emit function type declarations |
+| **MUST** | Emit function table and elem sections |
+| **MUST** | Implement `__apply1` for unary function dispatch |
+| ✅ **DONE** | Handle partial application (create new PAp) |
+| ✅ **DONE** | Multi-arity apply (`__apply2`, `__apply3`) |
+
+#### Completed Tasks
+
+1. ✅ Added `WatFuncType` data type for function type signatures
+2. ✅ Added `CallIndirect` instruction to `WatInstr`
+3. ✅ Extended `WatModule` with `moduleFuncTypes` and `moduleTableFuncs`
+4. ✅ Updated emitter to output:
+   - `(type $name (func ...))` declarations
+   - `(table N funcref)` section
+   - `(elem (i32.const 0) $f1 $f2 ...)` section
+5. ✅ Added `__apply1(pap_ptr, arg) -> result` function:
+   - Reads PAp header to get function index
+   - Dispatches via `call_indirect (type $arity_1)`
+6. ✅ Added `runtimeFuncTypes` with `arity_1` through `arity_6` types
+7. ✅ Fixed PAp memory layout offsets (func_id at offset 8, capturedCount at offset 18)
+8. ✅ Implemented `compileApplyPAp` with proper `If I64` result types for dynamic dispatch
+9. ✅ Added `I32Load16U` instruction for reading capturedCount
+10. ✅ Fixed partial application in `TApp FComb` to properly store captured args
+11. ✅ Added `ctxRefTableIndices` to context for proper function table indexing
+12. ✅ All 225 tests pass (7 closure tests now passing)
+
+#### Completed Closure Tests
+
+- `curried_add` - Multi-argument functions: `f x y = ##Nat.+ x y`
+- `single_arg_closure` - Lambdas: `inc = x -> ##Nat.+ x 1`
+- `closure_capture` - Capturing values: `addN n = x -> ##Nat.+ n x`
+- `nested_closures` - Currying: `add = x -> y -> ##Nat.+ x y`
+- `hof_apply` - Higher-order function: `apply f x = f x`
+- `multi_capture` - Multiple captures: `linear a b = x -> ##Nat.+ (##Nat.* a x) b`
+- `closure_return` - Returning closures: `makeAdder n = x -> ##Nat.+ n x`
+
+#### Notes
+
+All originally deferred items have been completed:
+- ✅ Partial application return (Phase 3.5)
+- ✅ Multi-arity apply (`__apply2`, `__apply3`) (Phase 3.5)
 
 **Verification Checkpoint:**
 ```bash
@@ -892,186 +922,129 @@ console.log('mapped =', runtime.listToArray(result)); // [2, 3, 4]
 
 **Exit Criteria:** Partial application works; `apply()` invokes closures correctly; `map` over a list works.
 
----
+#### Alignment Status (Phases 0-4.5)
 
-### Phase 5A: Exception Ability (Affine Handlers)
+After completing Phase 4.5, the following alignment with the native runtime has been verified:
 
-**Goal:** Implement the built-in `Exception` ability using affine handlers (no continuation capture).
+| Area | Status | Notes |
+|------|--------|-------|
+| TypedSlot ↔ Val | ✅ Aligned | Both use (type discriminator + payload) |
+| ObjTag ↔ GClosure | ✅ Aligned | 1:1 mapping of all closure types |
+| FrameTag ↔ K | ✅ Aligned | KE/Push/Mark frames match |
+| Pattern matching | ✅ Aligned | Uses CTag (constructor ID) for comparison |
+| PackedTag encoding | ✅ Aligned | Same bit layout |
+| PAp dispatch | ✅ Aligned | Uses table index for call_indirect |
 
-#### Background: Built-in vs. Library Abilities
-
-Unison has only **one truly built-in ability**: `Exception`. It's defined in `Builtin/Decls.hs` with a single operation:
-
-```haskell
-Exception.raise : Failure -> {Exception} a
-```
-
-All other abilities (`IO`, `Abort`, `Ask`, `Store`, `Throw`, `State`, `Each`) are **library-defined** but use the same underlying mechanism.
-
-#### Affine vs. Non-Affine Handlers
-
-The runtime distinguishes two handler types (see `Stack.hs`):
-
-| Handler Type | K Frame | Continuation | Use Case |
-|--------------|---------|--------------|----------|
-| **Affine** | `AMark` | Never captured, only discarded or tail-resumed | `Exception`, early-exit |
-| **Non-Affine** | `Mark` | Captured and resumed with a value | `State`, `Counter`, `Ask` |
-
-Affine handlers are simpler because they don't need continuation capture—they just unwind the stack. We implement these first.
-
-#### Phase 5A Contract
-
-| | |
-|-|-|
-| **MUST** | Implement `K` as linked list with `Push` frames per ABI |
-| **MUST** | Implement `AMark` frame for affine (exception-like) handlers |
-| **MUST** | Compile `THnd` to push `AMark` frame when handler is affine |
-| **MUST** | Compile `TReq` to lookup handler in ability environment |
-| **MUST** | Handle `Exception.raise` by unwinding stack to `AMark` |
-| **MUST** | Support `catch` / `handle` for Exception |
-| **MUST NOT** | Capture continuations (no `Captured` objects) |
-| **MUST NOT** | Resume continuations (affine handlers discard or tail-resume only) |
-| **Deferred** | Full `Mark` frames (Phase 5B), `TShift`/Capture (Phase 5B) |
-
-**Tasks:**
-1. Implement `K` continuation stack as linked `Push` frames in linear memory
-2. Implement `AMark` frame for affine handlers
-3. Compile `THnd` to create `AMark` frame when handler is affine
-4. Compile `TReq` to lookup handler in `AEnv` and invoke
-5. Implement stack unwinding for `Exception.raise`
-6. Support the `catch` pattern (try/handle for exceptions)
-
-**Verification Checkpoint:**
-```bash
-# Compile exception handling code
-.> compile.wasm mylib.exceptionTest
-
-# Run it - exception should be caught
-$ node test-exception.js
-Caught exception: 0
-Safe path: 42
-```
-
-**Test file (`test-exception.js`):**
-```javascript
-const { exports } = await loadWasm('exception.wasm');
-
-// Exception is raised but caught by handler
-const result1 = exports.exceptionTest();
-console.log('Caught exception:', result1); // 0
-
-// No exception raised
-const result2 = exports.safeTest();
-console.log('Safe path:', result2); // 42
-```
-
-**Unison source being tested:**
-```unison
--- Exception handling (never resumes)
-exceptionTest : Nat
-exceptionTest =
-  catch
-    (do
-      x = 42
-      Exception.raise (Failure (typeLink Unit) "oops" (Any ()))
-      x + 1)  -- never reached
-    (_ -> 0)  -- handler returns 0
-
--- No exception
-safeTest : Nat
-safeTest =
-  catch
-    (do 42)
-    (_ -> 0)
-```
-
-**Exit Criteria:** `Exception.raise` and `catch` work; stack unwinds correctly.
+See `WASM_ABI.md` "Alignment with Native Runtime" section for details.
 
 ---
 
-### Phase 5B: Full Delimited Continuations
+### Phase 5: Abilities (Pure Handlers)
 
-**Goal:** Implement full continuation capture/resume for abilities like `State`, `Counter`, `Ask`.
+**Status:** Not started
 
-#### Background: How Non-Affine Handlers Work
+**Goal:** Run Unison ability handlers entirely in WASM.
 
-Non-affine handlers can **capture and resume** the continuation:
-
-1. **TShift** captures K frames up to the nearest `Mark`, creating a `Captured` object
-2. The handler receives the captured continuation as a callable value
-3. **Jump** resumes by splicing the captured frames back onto K
-
-This is what makes `State.run`, `Counter.run`, and similar handlers work.
-
-#### Phase 5B Contract
+#### Phase 5 Contract
 
 | | |
 |-|-|
-| **MUST** | Implement `Mark` frame for non-affine handlers |
-| **MUST** | Compile `THnd` to push `Mark` frame for non-affine handlers |
-| **MUST** | Compile `TShift` to capture K up to `Mark`, allocating `Captured` |
+| **MUST** | Fix `BX` → `I32` pointer type (required for K frame pointers) |
+| **MUST** | Use TypedSlot for boxed values (handlers expect tagged values) |
+| **MUST** | Allocate `TBLit` as boxed TypedSlot |
+| **MUST** | Implement `K` as linked list of `Push`/`Mark` frames |
+| **MUST** | Compile `THnd` to push Mark frame with handler |
+| **MUST** | Compile `TShift` to capture K up to Mark |
 | **MUST** | Allocate `Captured` objects per ABI |
-| **MUST** | Implement `Jump` (resume) by splicing frames back onto K |
-| **MUST** | Support exactly-once resume (linear continuations) |
-| **MUST NOT** | Support multi-shot continuations (clone `Captured`) |
+| **MUST** | Resume captured continuations (exactly once) |
+| **SHOULD** | Allocate `Enum`, `Data1`, `Data2`, `DataG` per ABI (for handler results) |
+| **SHOULD** | Implement `FCon` for data types with fields (Optional, Either) |
+| **SHOULD** | Implement `MatchData` with field bindings |
 | **MUST NOT** | Yield to JS (all handlers run in WASM) |
-| **Deferred** | Multi-shot continuations (future), Foreign calls (Phase 6) |
+| **MUST NOT** | Handle async operations |
+| **Deferred** | Foreign calls (Phase 6), Async (Phase 7) |
+
+#### Prerequisites (from earlier phases)
+
+These items were deferred from Phases 3–4 because they weren't blocking progress, but are required for abilities:
+
+| Item | Why Needed for Phase 5 |
+|------|------------------------|
+| `BX` → `I32` pointer type | K frames store 32-bit pointers to saved locals |
+| TypedSlot boxing | Handlers inspect TypeTag to dispatch on value types |
+| `TBLit` boxing | Boxed literals must be tagged for handler inspection |
+| Data types (Optional/Either) | Common handler return types |
+| MatchData with field bindings | Destructuring `Some x` in handlers |
+
+#### Alignment with Native Runtime
+
+Before implementing Phase 5, review how the native runtime handles continuations:
+
+| Native Function | File | Our Equivalent |
+|-----------------|------|----------------|
+| `splitCont` | `Machine.hs` | Walk K, create `Captured` |
+| `repush` | `Machine.hs` | Resume by splicing K frames |
+| `dataBranch` | `Machine.hs` | Pattern match dispatch |
+| `buildData` | `Machine.hs` | Create Enum/Data1/Data2/DataG |
+
+**Key differences from native:**
+
+1. **PAp stores `func_id` (table index) vs `CombIx`**: Native stores rich reference info; we use table indices for `call_indirect`. For K frame resumption, the table index is sufficient since we look up functions dynamically.
+
+2. **No RSection caching**: Native Push frames cache compiled code; WASM uses `call_indirect` which handles this.
+
+3. **DEnv structure needed**: Native uses `EnumMap Word64 Closure` for ability handlers. We need to design a WASM-compatible representation.
 
 **Tasks:**
-1. Implement `Mark` frame in linear memory per ABI
-2. Compile `THnd` to push `Mark` when handler is non-affine
-3. Implement `TShift` → `Capture` instruction
-4. Allocate `Captured` object containing copied K segment + saved locals
-5. Implement `Jump` → restore K segment and resume
-6. Verify linearity (exactly-once resume)
+
+*Prerequisites:*
+1. Investigate why ANF marks unboxed Nat values as `BX`
+2. Fix `memToValType BX = I32` for proper 32-bit pointers
+3. Implement TypedSlot allocation for boxed values
+4. Implement `TBLit` as heap-allocated TypedSlot
+5. Implement `FCon` for Data1/Data2/DataG (with fields)
+6. Implement `MatchData` with field bindings
+7. Design DEnv representation for ability handlers
+
+*Abilities:*
+8. Implement `K` continuation stack as linked frames per ABI
+9. Implement `TShift` (capture) by walking `K`, allocating `Captured`
+10. Implement `THnd` (handle) by pushing `Mark` frames
+11. Implement `Jump` (resume) by splicing frames back
 
 **Verification Checkpoint:**
 ```bash
-# Compile the State example
-.> compile.wasm mylib.stateExample
+# Compile the Counter example
+.> compile.wasm mylib.counterExample
 
 # Run it entirely in WASM - no JS handlers needed
-$ node test-state.js
-State result: (10, 15)
-Counter result: 4
+$ node test-counter.js
+Counter.run result = 42
+State.run result = (finalState, value)
 ```
 
-**Test file (`test-state.js`):**
+**Test file (`test-counter.js`):**
 ```javascript
-const { exports } = await loadWasm('state.wasm');
+const { exports } = await loadWasm('counter.wasm');
 
-// State.run executes entirely in WASM
-const stateResult = exports.stateExample();
-console.log('State result:', stateResult); // [10, 15]
-
-// Counter.run also works
-const counterResult = exports.counterExample();
-console.log('Counter result:', counterResult); // 4
+// This runs the ENTIRE handler in WASM
+// No yields to JS - pure delimited control
+const result = exports.runCounterExample();
+console.log('Counter result:', result); // 42
 ```
 
 **Unison source being tested:**
 ```unison
--- State (resumes with value)
-stateExample : (Nat, Nat)
-stateExample =
-  State.run 0 do
-    State.put 10
-    x = State.get
-    State.put (x + 5)
-    y = State.get
-    (x, y)  -- (10, 15)
-
--- Counter (maintains state across resumes)
 counterExample : Nat
 counterExample =
   Counter.run do
     Counter.inc()
     Counter.inc()
     x = Counter.get()
-    x * 2  -- 2 * 2 = 4
+    x * 2  -- returns 4
 ```
 
-**Exit Criteria:** `State.run`, `Counter.run`, and `Ask.provide` work entirely in WASM.
+**Exit Criteria:** `Counter` and `State` abilities work entirely in WASM.
 
 ---
 

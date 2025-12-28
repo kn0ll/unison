@@ -4,7 +4,7 @@
 -- The WatInstr/WatFunction/WatModule types serve as an intermediate representation
 -- between SuperGroup compilation and WAT text output.
 --
--- Phase 3 additions: I32 type, memory operations, globals for heap allocation.
+-- Supports function tables for call_indirect and apply() for closure invocation.
 module Unison.Wasm.Emit
   ( -- * WAT Types
     WatModule (..),
@@ -12,6 +12,7 @@ module Unison.Wasm.Emit
     WatInstr (..),
     WatValType (..),
     WatGlobal (..),
+    WatFuncType (..),
 
     -- * Emission
     emitModule,
@@ -39,12 +40,22 @@ data WatGlobal = WatGlobal
   }
   deriving (Eq, Show)
 
+-- | WASM function type signature (for call_indirect)
+data WatFuncType = WatFuncType
+  { funcTypeName :: String,
+    funcTypeParams :: [WatValType],
+    funcTypeResults :: [WatValType]
+  }
+  deriving (Eq, Show)
+
 -- | WASM instructions (subset needed for current phases)
 data WatInstr
   = -- | Get a local variable: @local.get $name@
     LocalGet String
   | -- | Set a local variable: @local.set $name@
     LocalSet String
+  | -- | Tee a local variable (set and keep on stack): @local.tee $name@
+    LocalTee String
   | -- | Get a global variable: @global.get $name@
     GlobalGet String
   | -- | Set a global variable: @global.set $name@
@@ -57,6 +68,8 @@ data WatInstr
     I32Add
   | -- | i32 subtraction: @i32.sub@
     I32Sub
+  | -- | i32 multiplication: @i32.mul@
+    I32Mul
   | -- | i32 and: @i32.and@
     I32And
   | -- | i32 or: @i32.or@
@@ -89,6 +102,8 @@ data WatInstr
     I64Store Word32  -- offset
   | -- | Load i8 from memory (zero-extend to i32): @i32.load8_u offset=n@
     I32Load8U Word32  -- offset
+  | -- | Load i16 from memory (zero-extend to i32): @i32.load16_u offset=n@
+    I32Load16U Word32  -- offset
   | -- | Store low 8 bits of i32 to memory: @i32.store8 offset=n@
     I32Store8 Word32  -- offset
 
@@ -165,6 +180,8 @@ data WatInstr
   -- Control flow
   | -- | Call a function: @call $name@
     Call String
+  | -- | Indirect function call: @call_indirect (type $typeName)@
+    CallIndirect String  -- type name
   | -- | Conditional branch: @if (result type) ... else ... end@
     If WatValType [WatInstr] [WatInstr]
   | -- | If without result (for side effects only)
@@ -185,6 +202,10 @@ data WatInstr
     Unreachable
   | -- | Drop top of stack: @drop@
     Drop
+  | -- | Comment (for debugging): @;; comment@
+    Comment String
+  | -- | Nop (no operation)
+    Nop
   deriving (Eq, Show)
 
 -- | A WASM function definition
@@ -212,7 +233,11 @@ data WatModule = WatModule
     -- | Exported function names (must reference functions in moduleFunctions)
     moduleExports :: [String],
     -- | Export memory with this name
-    moduleMemoryExport :: Maybe String
+    moduleMemoryExport :: Maybe String,
+    -- | Function types for call_indirect
+    moduleFuncTypes :: [WatFuncType],
+    -- | Function table entries (function names to include in table)
+    moduleTableFuncs :: [String]
   }
   deriving (Eq, Show)
 
@@ -226,6 +251,7 @@ emitValType F64 = "f64"
 emitInstr :: WatInstr -> String
 emitInstr (LocalGet name) = "local.get $" ++ name
 emitInstr (LocalSet name) = "local.set $" ++ name
+emitInstr (LocalTee name) = "local.tee $" ++ name
 emitInstr (GlobalGet name) = "global.get $" ++ name
 emitInstr (GlobalSet name) = "global.set $" ++ name
 
@@ -233,6 +259,7 @@ emitInstr (GlobalSet name) = "global.set $" ++ name
 emitInstr (I32Const n) = "i32.const " ++ show n
 emitInstr I32Add = "i32.add"
 emitInstr I32Sub = "i32.sub"
+emitInstr I32Mul = "i32.mul"
 emitInstr I32And = "i32.and"
 emitInstr I32Or = "i32.or"
 emitInstr I32Shl = "i32.shl"
@@ -250,6 +277,7 @@ emitInstr (I32Store offset) = "i32.store offset=" ++ show offset
 emitInstr (I64Load offset) = "i64.load offset=" ++ show offset
 emitInstr (I64Store offset) = "i64.store offset=" ++ show offset
 emitInstr (I32Load8U offset) = "i32.load8_u offset=" ++ show offset
+emitInstr (I32Load16U offset) = "i32.load16_u offset=" ++ show offset
 emitInstr (I32Store8 offset) = "i32.store8 offset=" ++ show offset
 
 -- i64 operations
@@ -291,6 +319,7 @@ emitInstr F64Ge = "f64.ge"
 
 -- Control flow
 emitInstr (Call name) = "call $" ++ name
+emitInstr (CallIndirect typeName) = "call_indirect (type $" ++ typeName ++ ")"
 emitInstr (If resultTy thenInstrs elseInstrs) =
   unlines $
     ["if (result " ++ emitValType resultTy ++ ")"]
@@ -321,14 +350,17 @@ emitInstr (BrTable labels dflt) =
 emitInstr Return = "return"
 emitInstr Unreachable = "unreachable"
 emitInstr Drop = "drop"
+emitInstr (Comment s) = ";; " ++ s
+emitInstr Nop = "nop"
 
 -- | Emit a global variable definition
 emitGlobal :: WatGlobal -> String
 emitGlobal g =
-  "  (global $" ++ globalName g ++ " " ++ mutability ++ emitValType (globalType g) ++ " (" ++ emitValType (globalType g) ++ ".const " ++ initVal ++ "))"
+  "  (global $" ++ globalName g ++ " " ++ typeDecl ++ " (" ++ emitValType (globalType g) ++ ".const " ++ show (globalInit g) ++ "))"
   where
-    mutability = if globalMutable g then "(mut " else "("
-    initVal = show (globalInit g) ++ ")"
+    typeDecl = if globalMutable g
+               then "(mut " ++ emitValType (globalType g) ++ ")"
+               else emitValType (globalType g)
 
 -- | Emit a function definition to WAT text
 emitFunction :: WatFunction -> String
@@ -363,16 +395,42 @@ emitModule :: WatModule -> String
 emitModule m =
   unlines $
     ["(module"]
+      ++ typeDecls
       ++ memoryDecl
+      ++ tableDecl
       ++ map emitGlobal (moduleGlobals m)
       ++ map emitFunction (moduleFunctions m)
+      ++ elemDecl
       ++ map emitExport (moduleExports m)
       ++ memoryExportDecl
       ++ [")"]
   where
+    -- Function type declarations (for call_indirect)
+    typeDecls = map emitFuncType (moduleFuncTypes m)
+
+    emitFuncType ft =
+      let params = if null (funcTypeParams ft)
+                     then ""
+                     else " (param " ++ unwords (map emitValType (funcTypeParams ft)) ++ ")"
+          results = if null (funcTypeResults ft)
+                      then ""
+                      else " (result " ++ unwords (map emitValType (funcTypeResults ft)) ++ ")"
+      in "  (type $" ++ funcTypeName ft ++ " (func" ++ params ++ results ++ "))"
+
     memoryDecl = case moduleMemory m of
       Nothing -> []
       Just pages -> ["  (memory " ++ show pages ++ ")"]
+
+    -- Function table (for call_indirect)
+    tableDecl
+      | null (moduleTableFuncs m) = []
+      | otherwise = ["  (table " ++ show (length (moduleTableFuncs m)) ++ " funcref)"]
+
+    -- Element section populates the table with function references
+    elemDecl
+      | null (moduleTableFuncs m) = []
+      | otherwise =
+          ["  (elem (i32.const 0) " ++ unwords (map ("$" ++) (moduleTableFuncs m)) ++ ")"]
 
     memoryExportDecl = case moduleMemoryExport m of
       Nothing -> []
