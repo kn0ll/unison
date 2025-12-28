@@ -12,6 +12,12 @@ library:
 
   dependencies:
     - base
+    - containers
+    - text
+    - unison-hash
+    - unison-parser-typechecker
+    - unison-runtime
+    - unison-core1
 
 executables:
   unison-wasm-poc:
@@ -23,6 +29,11 @@ executables:
         other-modules: Paths_unison_wasm
     dependencies:
       - base
+      - text
+      - unison-core1
+      - unison-parser-typechecker
+      - unison-runtime
+      - unison-syntax
       - unison-wasm
 
 tests:
@@ -37,6 +48,10 @@ tests:
       - base
       - code-page
       - easytest
+      - text
+      - unison-core1
+      - unison-parser-typechecker
+      - unison-runtime
       - unison-wasm
 
 default-extensions:

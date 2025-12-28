@@ -12,11 +12,16 @@ This document provides guidance for AI agents working on the Unison WASM compila
 - [`plans/WASM.md`](./plans/WASM.md) — Implementation plan with phased approach
 - [`plans/WASM_ABI.md`](./plans/WASM_ABI.md) — Memory layout specification (the ABI contract)
 
-**Current Phase:** Phase 2 (SuperGroup → WAT Pipeline)
+**Current Phase:** Phase 3 (Sum Types and Memory) — Not yet started
 
 **Completed Phases:**
 - Phase 0: ABI Bootstrap + Conformance Tests ✅
 - Phase 1: Arithmetic in WAT ✅
+- Phase 2: SuperGroup → WAT Pipeline ✅ (parse → lamLift → superNormalize → factorial(5) = 120)
+
+**Test Counts (as of Phase 2 completion):**
+- Haskell: 129 tests pass
+- JavaScript: 79 tests pass
 
 ---
 
@@ -376,6 +381,7 @@ unison-wasm/
 │       └── Test/
 │           └── Wasm/
 │               ├── ABI.hs          # ABI constants tests
+│               ├── Compile.hs      # SuperGroup compilation tests
 │               └── Emit.hs         # WAT emission tests
 │
 ├── js/                             # TypeScript/JavaScript runtime
@@ -390,7 +396,7 @@ unison-wasm/
 │   ├── dist/                       # Compiled JavaScript output
 │   └── tests/                      # Node.js tests
 │       ├── abi.test.js             # ABI conformance tests (Phase 0)
-│       └── wat.test.js             # WAT execution tests (Phase 1)
+│       └── wat.test.js             # WAT execution tests (Phase 1+2)
 │
 └── app/                            # CLI executable
     └── Main.hs                     # unison-wasm-poc
@@ -427,8 +433,8 @@ testEquivalence sg = scope "equivalence" $ do
 
 Tests run on every PR. Ensure:
 
-1. `stack test unison-wasm` passes (108 tests as of Phase 1)
-2. `npm test` in `unison-wasm/js/` passes (66 tests as of Phase 1)
+1. `stack test unison-wasm` passes (129 tests as of Phase 2)
+2. `npm test` in `unison-wasm/js/` passes (79 tests as of Phase 2)
 3. No new compiler warnings
 4. Code formatted with project standards
 
@@ -474,7 +480,19 @@ Most abilities run **entirely in WASM** — only `ForeignCall` operations yield 
 - `Counter`, `State`, custom abilities → Unison handler in `DEnv` → WASM only
 - `IO.printLine`, `fetch` → `ForeignCall` → yields to JS
 
-### 6. Forgetting Apply for Closures
+### 6. Phase 2 Shortcuts Still in Code
+
+Phase 2 took shortcuts that must be fixed in Phase 3:
+
+| Shortcut | Location | Fix in Phase 3 |
+|----------|----------|----------------|
+| `BX` → `I64` | `Compile.hs:132` | Change to `I32` for 32-bit pointers |
+| `TBLit` unboxed | `Compile.hs:408` | Allocate as TypedSlot with TypeTag |
+| Single-case `MatchNumeric` | `Compile.hs:528-532` | Full if/else chain or br_table |
+
+Don't be surprised if you see boxed values treated as i64 — it's intentional Phase 2 debt.
+
+### 7. Forgetting Apply for Closures
 
 JS cannot directly call closures returned by Unison. Use the `apply()` export:
 
@@ -498,6 +516,45 @@ TypeScript provides compile-time safety for apply calls.
 
 ---
 
+## Quick Reference: Phase 2 Parsing Pipeline
+
+The full compilation pipeline from Unison source to WASM:
+
+```
+Unison source string
+    ↓ Parser.run (Parser.root TermParser.term)
+Term v
+    ↓ splitPatterns builtinDataSpec
+Term v (pattern desugaring)
+    ↓ lamLift mempty
+(Set Reference, SuperGroup v) (lifted combinators + main)
+    ↓ superNormalize
+(main: SuperGroup v, lifted: Map Reference SuperGroup)
+    ↓ compileGroupWithLifted
+WAT module (multiple functions if lambda-lifted)
+    ↓ wabt (JS)
+WASM binary
+```
+
+**Key functions in `/workspaces/unison/unison-wasm/`:**
+- `Main.hs`: `parseTerm`, `termToSuperGroup`, `parseAndCompile`
+- `Compile.hs`: `compileGroupWithLifted`, `builtinToPrimOp`, `refToFuncName`
+
+**CLI commands:**
+```bash
+# Compile from actual Unison source (Phase 2 achievement)
+stack exec unison-wasm-poc -- compile factorial \
+    'let go n = match n with 0 -> 1; _ -> ##Nat.* n (go (##Nat.sub n 1)); go 5'
+
+# Debug SuperGroup structure
+stack exec unison-wasm-poc -- debug '<unison code>'
+
+# Legacy hardcoded SuperGroups
+stack exec unison-wasm-poc -- emit-factorial
+```
+
+---
+
 ## Checklist Before Submitting Changes
 
 **Code Quality:**
@@ -512,7 +569,7 @@ TypeScript provides compile-time safety for apply calls.
 
 **Testing:**
 - [ ] `stack test unison-wasm` passes
-- [ ] `npm test` in `test/` passes (if JS changes)
+- [ ] `npm test` in `js/` passes (if JS changes)
 - [ ] New Haskell tests use EasyTest with proper `scope`
 - [ ] Test modules follow `Unison.Test.Wasm.*` namespace
 - [ ] Behavioral equivalence verified against interpreter

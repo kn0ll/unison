@@ -119,15 +119,22 @@ module Unison.Wasm.ABI
     sequenceLengthOffset,
     sequenceElementsOffset,
 
-    -- ** K Frame offsets
+    -- ** K Frame offsets (Push)
     kPushFrameTagOffset,
-    kPushReturnPCOffset,
     kPushNextKOffset,
-    kPushLocalCountOffset,
+    kPushSavedCountOffset,
+    kPushPendingArgsOffset,
+    kPushCombIxOffset,
     kPushSavedLocalsOffset,
+    -- Legacy aliases
+    kPushReturnPCOffset,
+    kPushLocalCountOffset,
+
+    -- ** K Frame offsets (Mark)
     kMarkFrameTagOffset,
-    kMarkAbilityRefOffset,
     kMarkNextKOffset,
+    kMarkPendingArgsOffset,
+    kMarkAbilityRefOffset,
     kMarkHandlerPtrOffset,
     kMarkLocalCountOffset,
     kMarkSavedLocalsOffset,
@@ -154,6 +161,15 @@ module Unison.Wasm.ABI
 
     -- * Alignment
     align8,
+
+    -- * Memory Layout Constants
+    memoryNullZoneStart,
+    memoryNullZoneEnd,
+    memoryGlobalsStart,
+    memoryGlobalsEnd,
+    memoryRefTablesStart,
+    memoryRefTablesEnd,
+    memoryHeapStart,
   )
 where
 
@@ -351,12 +367,13 @@ bytesBaseSize = 16
 sequenceBaseSize :: Word32
 sequenceBaseSize = 16
 
--- | KPush base: frame tag + return PC + next K + local count (before saved locals)
+-- | KPush base: FrameTag+Reserved+Next (8) + SavedCount+PendingArgs (8) + CombIx (8)
+-- = 24 bytes before saved locals
 kPushBaseSize :: Word32
-kPushBaseSize = 16
+kPushBaseSize = 24
 
--- | KMark base: frame tag + ability ref + next K + handler ptr + local count
--- (before saved locals)
+-- | KMark base: FrameTag+Reserved+Next (8) + PendingArgs+AbilitySet (8) + SavedDEnv+Reserved (8)
+-- = 24 bytes (fixed size, no saved locals in Mark frames)
 kMarkBaseSize :: Word32
 kMarkBaseSize = 24
 
@@ -460,38 +477,61 @@ sequenceElementsOffset :: Word32
 sequenceElementsOffset = 16
 
 -- K Frame offsets
+-- Layout matches WASM_ABI.md Push Frame specification:
+--   bytes 0-7:   FrameTag (8) + Reserved (24) + Next (32)
+--   bytes 8-15:  SavedCount (32) + PendingArgs (32)
+--   bytes 16-23: CombIx: Reference (32) + Comb# (32)
+--   bytes 24+:   Saved[0..SavedCount-1]: TypedSlot (128 bits each)
 
--- KPush
+-- KPush frame offsets
 kPushFrameTagOffset :: Word32
 kPushFrameTagOffset = 0
-
-kPushReturnPCOffset :: Word32
-kPushReturnPCOffset = 2
 
 kPushNextKOffset :: Word32
 kPushNextKOffset = 4
 
-kPushLocalCountOffset :: Word32
-kPushLocalCountOffset = 8
+kPushSavedCountOffset :: Word32
+kPushSavedCountOffset = 8
+
+kPushPendingArgsOffset :: Word32
+kPushPendingArgsOffset = 12
+
+kPushCombIxOffset :: Word32
+kPushCombIxOffset = 16
 
 kPushSavedLocalsOffset :: Word32
-kPushSavedLocalsOffset = 16
+kPushSavedLocalsOffset = 24
 
--- KMark
+-- Legacy aliases for compatibility
+kPushReturnPCOffset :: Word32
+kPushReturnPCOffset = kPushCombIxOffset
+
+kPushLocalCountOffset :: Word32
+kPushLocalCountOffset = kPushSavedCountOffset
+
+-- KMark frame offsets
+-- Layout:
+--   bytes 0-7:   FrameTag (8) + Reserved (24) + Next (32)
+--   bytes 8-15:  PendingArgs (32) + AbilitySet ptr (32)
+--   bytes 16-23: SavedDEnv pointer (32) + Reserved (32)
 kMarkFrameTagOffset :: Word32
 kMarkFrameTagOffset = 0
 
-kMarkAbilityRefOffset :: Word32
-kMarkAbilityRefOffset = 4
-
 kMarkNextKOffset :: Word32
-kMarkNextKOffset = 8
+kMarkNextKOffset = 4
+
+kMarkPendingArgsOffset :: Word32
+kMarkPendingArgsOffset = 8
+
+kMarkAbilityRefOffset :: Word32
+kMarkAbilityRefOffset = 12
 
 kMarkHandlerPtrOffset :: Word32
-kMarkHandlerPtrOffset = 12
+kMarkHandlerPtrOffset = 16
 
+-- Mark frames don't have saved locals in the same way Push frames do
 kMarkLocalCountOffset :: Word32
-kMarkLocalCountOffset = 16
+kMarkLocalCountOffset = 20
 
 kMarkSavedLocalsOffset :: Word32
 kMarkSavedLocalsOffset = 24
@@ -614,3 +654,42 @@ kMarkSize localCount = align8 (kMarkBaseSize + localCount * typedSlotSize)
 -- | Round up to 8-byte alignment
 align8 :: Word32 -> Word32
 align8 n = (n + 7) .&. (0xFFFF_FFFF `xor` 7)
+
+-- -----------------------------------------------------------------------------
+-- Memory Layout Constants
+-- -----------------------------------------------------------------------------
+-- Canonical layout: heap grows UP, stack grows DOWN
+--
+-- 0x0000 - 0x0FFF: Null trap zone (4KB)
+-- 0x1000 - 0x1FFF: Runtime globals
+-- 0x2000 - 0x3FFF: Reference tables
+-- 0x4000+:         Heap (grows UP)
+-- (top of memory): Stack (grows DOWN)
+
+-- | Start of null trap zone
+memoryNullZoneStart :: Word32
+memoryNullZoneStart = 0x0000
+
+-- | End of null trap zone (4KB)
+memoryNullZoneEnd :: Word32
+memoryNullZoneEnd = 0x0FFF
+
+-- | Start of runtime globals region
+memoryGlobalsStart :: Word32
+memoryGlobalsStart = 0x1000
+
+-- | End of runtime globals region
+memoryGlobalsEnd :: Word32
+memoryGlobalsEnd = 0x1FFF
+
+-- | Start of reference tables region
+memoryRefTablesStart :: Word32
+memoryRefTablesStart = 0x2000
+
+-- | End of reference tables region
+memoryRefTablesEnd :: Word32
+memoryRefTablesEnd = 0x3FFF
+
+-- | Heap start - grows UP from here
+memoryHeapStart :: Word32
+memoryHeapStart = 0x4000

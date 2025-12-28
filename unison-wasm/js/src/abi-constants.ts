@@ -293,26 +293,37 @@ export const MARK_ABILITIES_OFFSET = 12;
 export const MARK_DENV_OFFSET = 16;
 
 // =============================================================================
-// Memory regions (default layout)
+// Memory regions (canonical layout: heap UP, stack DOWN)
 // =============================================================================
 
 /** Start of null trap zone (accesses here are bugs) */
 export const MEMORY_NULL_ZONE_START = 0x0000;
 
-/** End of null trap zone */
+/** End of null trap zone (4KB) */
 export const MEMORY_NULL_ZONE_END = 0x0fff;
 
 /** Start of runtime globals region */
 export const MEMORY_GLOBALS_START = 0x1000;
 
+/** End of runtime globals region */
+export const MEMORY_GLOBALS_END = 0x1fff;
+
 /** Start of reference tables region */
 export const MEMORY_REFTABLES_START = 0x2000;
 
-/** Start of stack region */
-export const MEMORY_STACK_START = 0x10000;
+/** End of reference tables region */
+export const MEMORY_REFTABLES_END = 0x3fff;
 
-/** Default heap start (can grow) */
-export const MEMORY_HEAP_START = 0x100000;
+/** Heap start - grows UP from here */
+export const MEMORY_HEAP_START = 0x4000;
+
+/**
+ * Memory layout:
+ * - Heap grows UP from MEMORY_HEAP_START (0x4000)
+ * - Stack grows DOWN from top of memory
+ * - They share the space between them and grow toward each other
+ * - Collision triggers memory growth or OutOfMemoryError
+ */
 
 // =============================================================================
 // Alignment

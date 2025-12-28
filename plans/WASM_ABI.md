@@ -591,19 +591,23 @@ Code should check the version field and fail gracefully on unknown versions.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ 0x0000: Reserved (null pointer trap)                             │
+│ 0x0000 - 0x0FFF: Null trap zone (4KB)                           │
+│         Any access here indicates a bug (null pointer deref)    │
 ├─────────────────────────────────────────────────────────────────┤
-│ 0x1000: Runtime globals (K pointer, heap pointer, etc.)         │
+│ 0x1000 - 0x1FFF: Runtime globals                                │
+│         $k_ptr, $heap_ptr, $stack_ptr, $async_state, etc.       │
 ├─────────────────────────────────────────────────────────────────┤
-│ 0x2000: Reference tables (builtins, terms, types)               │
+│ 0x2000 - 0x3FFF: Reference tables (builtins, terms, types)      │
 ├─────────────────────────────────────────────────────────────────┤
-│ 0x10000: Stack region (grows up)                                │
-│          ↓                                                       │
-├─────────────────────────────────────────────────────────────────┤
-│          ↑                                                       │
-│ Heap region (grows down from top of memory)                     │
+│ 0x4000+: Heap region (bump allocated)                           │
+│                        ↑ grows UP ($heap_ptr advances)          │
+│         ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─              │
+│                        ↓ grows DOWN ($stack_ptr retreats)       │
+│ (top of memory): Stack region                                   │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+**Growth model:** Heap grows UP from 0x4000, stack grows DOWN from top of memory. They share the space between them. Collision triggers memory growth or `OutOfMemoryError`.
 
 ---
 
@@ -685,18 +689,22 @@ On resume(resultA):
 
 This enables sequential async without reentrancy or multiple outstanding continuations.
 
-### Runtime Globals for Async State
+### Runtime Globals (0x1000 - 0x1FFF)
 
 ```
 ┌────────────────────────────────────────┐
 │ 0x1000: Runtime Globals                │
 ├────────────────────────────────────────┤
-│ +0x00: K pointer (current continuation)│
-│ +0x08: Heap pointer                    │
-│ +0x10: Async state (0=none, 1=pending) │
-│ +0x18: Pending continuation ID         │
+│ +0x00: $k_ptr (i32) - K frame chain    │
+│ +0x04: $heap_ptr (i32) - bump alloc    │
+│ +0x08: $stack_ptr (i32) - stack top    │
+│ +0x0C: $async_state (i32) - 0/1        │
+│ +0x10: $async_cont_id (i32)            │
+│ +0x14: (reserved for future use)       │
 └────────────────────────────────────────┘
 ```
+
+**Note:** All globals are also exposed as WASM globals for efficient access. The linear memory copy is for debugging/introspection.
 
 The `asyncState` global is checked on yield:
 - If already `pending`, throw `NestedAsyncError`
@@ -916,5 +924,15 @@ FRAME_MARK    = 0x02
 TYPED_SLOT_SIZE   = 16
 HEADER_SIZE       = 8
 PAP_HEADER_SIZE   = 24  // header + CombIx + arity fields
-PUSH_FRAME_HEADER = 32  // fixed header before saved locals
+PUSH_FRAME_HEADER = 24  // fixed header before saved locals (see Push Frame layout)
+
+// Memory layout (canonical: heap UP, stack DOWN)
+MEMORY_NULL_ZONE_START  = 0x0000
+MEMORY_NULL_ZONE_END    = 0x0FFF
+MEMORY_GLOBALS_START    = 0x1000
+MEMORY_GLOBALS_END      = 0x1FFF
+MEMORY_REFTABLES_START  = 0x2000
+MEMORY_REFTABLES_END    = 0x3FFF
+MEMORY_HEAP_START       = 0x4000  // Heap grows UP from here
+// Stack grows DOWN from top of memory
 ```

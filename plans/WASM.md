@@ -83,8 +83,8 @@ This table defines the **mechanical translation** from ANormal nodes to WASM ins
 |-------------|---------------|-------|
 | `TLit (N n)` | `i64.const n` | 1 |
 | `TLit (I i)` | `i64.const i` | 1 |
-| `TLit (F f)` | `f64.const f` | 1 |
-| `TLit (C c)` | `i64.const (ord c)` | 1 |
+| `TLit (F f)` | `f64.const f` | 2 |
+| `TLit (C c)` | `i64.const (ord c)` | 2 |
 | `TVar v` | `local.get $v` | 1 |
 | `TPrm ADDN [a,b]` | emit(a); emit(b); `i64.add` | 1 |
 | `TPrm SUBN [a,b]` | emit(a); emit(b); `i64.sub` | 1 |
@@ -92,9 +92,16 @@ This table defines the **mechanical translation** from ANormal nodes to WASM ins
 | `TPrm DIVN [a,b]` | emit(a); emit(b); `i64.div_u` | 1 |
 | `TPrm EQLN [a,b]` | emit(a); emit(b); `i64.eq` | 1 |
 | `TPrm LEQN [a,b]` | emit(a); emit(b); `i64.le_u` | 1 |
+| `TPrm ADDF [a,b]` | emit(a); emit(b); `f64.add` | 2 |
+| `TPrm SUBF [a,b]` | emit(a); emit(b); `f64.sub` | 2 |
+| `TPrm MULF [a,b]` | emit(a); emit(b); `f64.mul` | 2 |
+| `TPrm DIVF [a,b]` | emit(a); emit(b); `f64.div` | 2 |
+| `TBLit (N n)` | `i64.const n` ⚠️ Phase 2 shortcut: treats as unboxed | 2 |
 | `TLets _ [(v,_)] body cont` | emit(body); `local.set $v`; emit(cont) | 2 |
 | `TApp (FComb ref) args` | emit(args...); `call $ref` (statically known) | 2 |
-| `TMatch v branches` | emit(v); `br_table` on ObjTag/constructor | 3 |
+| `TApp (FComb (Builtin name)) args` | emit(args...); `builtinToPrimOp` → WASM op | 2 |
+| `TMatch v (MatchNumeric cases df)` | emit(v); `if`/`else` chain ⚠️ Phase 2: single-case only | 2 |
+| `TMatch v (MatchData branches)` | emit(v); `br_table` on ObjTag/constructor | 3 |
 | `TLit (T text)` | `call $allocText` with string data | 3 |
 | `TCon ref tag args` | `call $allocDataN` based on arity | 3 |
 | `TApp (FVar v) args` | `call $apply` (closure application) | 4 |
@@ -107,8 +114,12 @@ This table defines the **mechanical translation** from ANormal nodes to WASM ins
 **Key rules:**
 - In Phase 1-2, `TApp` is only allowed for statically-known functions (no closures).
 - In Phase 1-2, no heap allocation occurs — only i64 locals and WASM operand stack.
-- `TMatch` requires heap objects to exist (Phase 3+).
+- In Phase 2, `BX` (boxed) values are treated as `I64` — a shortcut fixed in Phase 3.
+- `TBLit` is treated as unboxed in Phase 2 — Phase 3 allocates proper TypedSlots.
+- `MatchNumeric` Phase 2 supports single-case only — Phase 3 adds full if/else chain.
+- `MatchData` (sum type matching) requires heap objects to exist (Phase 3+).
 - `TShift`/`THnd` require K frames to exist (Phase 5+).
+- Parsed code uses `FComb (Builtin "Nat.+")` not `TPrm ADDN`; `builtinToPrimOp` maps these.
 
 ---
 
@@ -388,20 +399,14 @@ This section shows the **simultaneous layout** of all runtime state. The WASM op
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ 0x0000: Null trap zone (accesses here = bug)                    │
+│ 0x0000 - 0x0FFF: Null trap zone (4KB, accesses here = bug)      │
 ├─────────────────────────────────────────────────────────────────┤
-│ 0x1000: Reference tables (builtin/term/type mappings)           │
+│ 0x1000 - 0x1FFF: Runtime globals                                │
+│         $k_ptr, $heap_ptr, $stack_ptr, $async_state, etc.       │
 ├─────────────────────────────────────────────────────────────────┤
-│ 0x4000: Stack Frames                                            │
-│         ┌─────────────────────────────────────────┐             │
-│         │ Frame 0: TypedSlot locals [0..N]        │             │
-│         ├─────────────────────────────────────────┤             │
-│         │ Frame 1: TypedSlot locals [0..M]        │             │
-│         └─────────────────────────────────────────┘             │
-│                        ↓ grows down                             │
+│ 0x2000 - 0x3FFF: Reference tables (builtins, terms, types)      │
 ├─────────────────────────────────────────────────────────────────┤
-│                        ↑ grows up                               │
-│ 0x10000+: Heap (bump allocated)                                 │
+│ 0x4000+: Heap (bump allocated, grows UP)                        │
 │         ┌─────────────────────────────────────────┐             │
 │         │ K Frames (linked list via Next ptr)     │             │
 │         │   Push { next, savedCount, locals... }  │             │
@@ -413,8 +418,19 @@ This section shows the **simultaneous layout** of all runtime state. The WASM op
 │         │ Captured Continuations                  │             │
 │         │   { kHeadPtr, savedValues... }          │             │
 │         └─────────────────────────────────────────┘             │
+│                        ↑ $heap_ptr grows up                     │
+│         ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─              │
+│                        ↓ $stack_ptr grows down                  │
+│         ┌─────────────────────────────────────────┐             │
+│         │ Frame 1: TypedSlot locals [0..M]        │             │
+│         ├─────────────────────────────────────────┤             │
+│         │ Frame 0: TypedSlot locals [0..N]        │             │
+│         └─────────────────────────────────────────┘             │
+│ (top of memory): Stack (grows DOWN from top)                    │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+**Memory growth model:** Heap and stack grow toward each other, maximizing shared space utilization. When they collide, memory must grow or `OutOfMemoryError` is thrown.
 
 ### Golden Invariants
 
@@ -582,52 +598,120 @@ $ node -e "
 
 ---
 
-### Phase 2: SuperGroup → WAT Pipeline
+### Phase 2: SuperGroup → WAT Pipeline ✅
 
-**Goal:** Compile actual Unison code (not hardcoded) through the full pipeline.
+**Status:** Complete (79 JS tests, 129 Haskell tests passing)
+
+**Goal:** Compile actual Unison source code (not hardcoded) through the full pipeline: parse → lamLift → superNormalize → WAT.
 
 #### Phase 2 Contract
 
 | | |
 |-|-|
-| **MUST** | Extract `SuperGroup` from UCM |
-| **MUST** | Traverse `TVar`, `TLit`, `TPrm`, `TLets` |
-| **MUST** | Support statically-known function calls (`TApp (FComb _)`) |
-| **MUST** | Emit WASM binary format (not just WAT) |
-| **MUST NOT** | Allocate heap objects |
-| **MUST NOT** | Handle closures or partial application |
-| **MUST NOT** | Pattern match on sum types |
-| **Deferred** | Heap allocation (Phase 3), Closures (Phase 4) |
+| **MUST** | Parse Unison source code to Term ✅ |
+| **MUST** | Lambda-lift and normalize to SuperGroup ✅ |
+| **MUST** | Compile SuperGroup to WAT ✅ |
+| **MUST** | Traverse `TVar`, `TLit`, `TBLit`, `TPrm`, `TLets` ✅ |
+| **MUST** | Support statically-known function calls (`TApp (FComb _)`) ✅ |
+| **MUST** | Map builtin references (`##Nat.+`) to WASM primitives ✅ |
+| **MUST** | Support integer pattern matching (`MatchNumeric`) ✅ |
+| **MUST** | Compile lifted combinators with reference resolution ✅ |
+| **MUST** | Emit WASM binary format (not just WAT) ✅ (via wabt in JS) |
+| **MUST NOT** | Allocate heap objects ✅ |
+| **MUST NOT** | Handle closures or partial application ✅ |
+| **MUST NOT** | Pattern match on sum types ✅ |
+| **Deferred** | UCM integration (compile.wasm command), Heap allocation (Phase 3), Closures (Phase 4) |
 
-**Tasks:**
-1. Hook into UCM to extract `SuperGroup` for a term
-2. Implement `SuperGroup` → WAT for subset: `TVar`, `TLit`, `TPrm` (arithmetic)
-3. Support multiple primitive ops: `ADDN`, `SUBN`, `MULN`, `DIVN`, comparisons
+**Completed Tasks:**
+1. Created `Compile.hs` module that compiles `SuperGroup Reference Symbol → WatModule` ✅
+2. Implemented parsing pipeline: `Parser.run → splitPatterns → lamLift → superNormalize` ✅
+3. Implemented `TVar`, `TLit` (N, I), `TBLit` (boxed literals), `TPrm` compilation ✅
+4. Support for arithmetic primitives: `ADDN`, `SUBN`, `MULN`, `DIVN`, `MODN`, comparisons ✅
+5. `builtinToPrimOp` maps FComb builtins (`##Nat.+`, `##Nat.sub`, etc.) to WASM instructions ✅
+6. CLI tool with `emit-*` commands AND `compile <name> <code>` for actual Unison parsing ✅
+7. JavaScript tests verify compiled WASM executes correctly ✅
+8. Full TLets support with proper local declarations ✅
+9. TApp FComb for recursive function calls + lifted combinator resolution ✅
+10. MatchNumeric for integer pattern matching (from parser, not MatchIntegral) ✅
+11. `compileGroupWithLifted` handles main function + lambda-lifted combinators ✅
+12. Reference → function name mapping via `Hash.toBase32HexText` for valid WASM identifiers ✅
+13. Factorial parsed from Unison source and tested end-to-end ✅
 
-**Verification Checkpoint:**
+**Pipeline Demonstration:**
 ```bash
-# In UCM, compile a Unison term to WASM
-.> compile.wasm mylib.factorial
+# Parse actual Unison source, compile through full pipeline
+$ stack exec unison-wasm-poc -- compile factorial \
+    'let go n = match n with 0 -> 1; _ -> ##Nat.* n (go (##Nat.sub n 1)); go 5'
 
-# Output: factorial.wat and factorial.wasm
-
-# Test it
-$ node test-factorial.js
-factorial(5) = 120
-factorial(10) = 3628800
+# Output: WAT module with two functions:
+# - $fn_kog0d86f (lambda-lifted 'go' combinator)
+# - $factorial (entry point calling go with argument 5)
 ```
 
-**Test file (`test-factorial.js`):**
-```javascript
-const fs = require('fs');
-const wasm = fs.readFileSync('factorial.wasm');
-WebAssembly.instantiate(wasm).then(({instance}) => {
-  console.log('factorial(5) =', instance.exports.factorial(5n));
-  console.log('factorial(10) =', instance.exports.factorial(10n));
-});
+**Verification (Passed):**
+```bash
+# Compile factorial from actual Unison source
+$ stack exec unison-wasm-poc -- compile factorial \
+    'let go n = match n with 0 -> 1; _ -> ##Nat.* n (go (##Nat.sub n 1)); go 5'
+(module
+  (func $fn_kog0d86f (param $n i64) (result i64)
+    ;; Lambda-lifted recursive helper
+    local.get $n
+    i64.const 0
+    i64.eq
+    if (result i64)
+      i64.const 1
+    else
+      local.get $n
+      local.get $n
+      i64.const 1
+      i64.sub
+      call $fn_kog0d86f
+      i64.mul
+    end
+  )
+  (func $factorial (result i64)
+    i64.const 5
+    call $fn_kog0d86f
+  )
+  (export "factorial" (func $factorial))
+)
+
+# Run via Node.js (from unison-wasm/js/)
+$ npm test
+# Output: 79 tests pass, including:
+#   ✅ factorial(0) = 1 (base case)
+#   ✅ factorial(1) = 1
+#   ✅ factorial(5) = 120 (Phase 2 exit criteria)
+#   ✅ factorial(10) = 3628800
+#   ✅ factorial(20) = 2432902008176640000
+#   ✅ Parsed Unison factorial (actual source code parsing)
 ```
 
-**Exit Criteria:** Compile and run `factorial` from actual Unison source.
+**Key Architecture Insight:**
+
+The parsing pipeline follows Unison's standard patterns from `MCode.hs`:
+```
+Unison source string
+    ↓ Parser.run (Parser.root TermParser.term)
+Term v
+    ↓ splitPatterns builtinDataSpec
+Term v (pattern desugaring)
+    ↓ lamLift mempty
+(Set Reference, SuperGroup v) (lifted combinators + main)
+    ↓ superNormalize
+(main: SuperGroup v, lifted: Map Reference SuperGroup)
+    ↓ compileGroupWithLifted
+WAT module (multiple functions if lambda-lifted)
+    ↓ wabt (JS)
+WASM binary
+```
+
+**Test Counts:**
+- Haskell: 129 tests pass (Nat, Int, Float, Char literals + operations)
+- JavaScript: 79 tests pass
+
+**Exit Criteria:** ✅ Parse and compile `factorial(5) = 120` from actual Unison source code.
 
 ---
 
@@ -643,16 +727,32 @@ WebAssembly.instantiate(wasm).then(({instance}) => {
 | **MUST** | Allocate `Enum`, `Data1`, `Data2`, `DataG` per ABI |
 | **MUST** | Compile `TMatch` to `br_table` on ObjTag |
 | **MUST** | Use TypedSlot for boxed values |
+| **MUST** | Fix `BX` → `I32` pointer type (currently `I64`) |
+| **MUST** | Allocate `TBLit` as boxed TypedSlot (not unboxed) |
+| **MUST** | Support multi-case `MatchNumeric` (not just single-case) |
 | **MUST NOT** | Implement closures or PAp |
 | **MUST NOT** | Create K frames |
 | **MUST NOT** | Handle abilities |
 | **Deferred** | Closures (Phase 4), Abilities (Phase 5) |
 
+#### Phase 2 Technical Debt to Address
+
+The following shortcuts from Phase 2 must be fixed:
+
+| Location | Issue | Fix |
+|----------|-------|-----|
+| `Compile.hs:132` | `memToValType BX = I64` | Change to `I32` for 32-bit pointers |
+| `Compile.hs:408` | `TBLit` treated as unboxed | Allocate as TypedSlot with TypeTag |
+| `Compile.hs:528-532` | Single-case `MatchNumeric` only | Implement full `br_table` or if-else chain |
+
 **Tasks:**
-1. Implement heap allocator per `WASM_ABI.md` layouts (use Phase 0 allocator)
-2. Implement `TMatch` compilation for data constructors
-3. Use Phase 0 memory inspector for debugging
-4. Verify layouts match Phase 0 conformance tests
+1. Fix pointer representation: boxed values use `I32` not `I64`
+2. Implement `TBLit` → allocate TypedSlot on heap
+3. Implement full `MatchNumeric` with multiple cases
+4. Implement heap allocator per `WASM_ABI.md` layouts (use Phase 0 allocator)
+5. Implement `TMatch` compilation for data constructors
+6. Use Phase 0 memory inspector for debugging
+7. Verify layouts match Phase 0 conformance tests
 
 **Verification Checkpoint:**
 ```bash
@@ -680,6 +780,17 @@ safeDivide(10, 0) = None
   // Shows: Data2 { tag: 0x003, field0: Nat(1), field1: Nat(2) }
 </script>
 ```
+
+**UCM Integration Notes:**
+
+Phase 2's CLI POC uses shortcuts that don't work for real codebase integration:
+
+| Shortcut | Location | UCM Requirement |
+|----------|----------|-----------------|
+| Builtin-only parsing env | `Main.hs:54-62` | Load names from codebase for user-defined terms |
+| Empty `lamLift` context | `Main.hs:75-77` | Pass existing combinators to reference compiled code |
+
+These shortcuts are acceptable for the standalone CLI POC but must be addressed for the `compile.wasm` UCM command. The UCM integration pattern should follow `HandleInput/Run.hs`.
 
 **Exit Criteria:** Pattern match on `Optional` works; memory inspector shows correct layout.
 

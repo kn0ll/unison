@@ -54,8 +54,7 @@ testFunction =
         let func =
               WatFunction
                 { funcName = "add",
-                  funcParams = [("a", I64), ("b", I64)],
-                  funcResults = [I64],
+                  funcParams = [("a", I64), ("b", I64)],                  funcLocals = [],                  funcResults = [I64],
                   funcBody = [LocalGet "a", LocalGet "b", I64Add]
                 }
         let wat = emitFunction func
@@ -65,6 +64,7 @@ testFunction =
               WatFunction
                 { funcName = "test",
                   funcParams = [("x", I64)],
+                  funcLocals = [],
                   funcResults = [],
                   funcBody = []
                 }
@@ -75,6 +75,7 @@ testFunction =
               WatFunction
                 { funcName = "test",
                   funcParams = [],
+                  funcLocals = [],
                   funcResults = [I64],
                   funcBody = []
                 }
@@ -85,6 +86,7 @@ testFunction =
               WatFunction
                 { funcName = "test",
                   funcParams = [],
+                  funcLocals = [],
                   funcResults = [I64],
                   funcBody = [I64Const 42]
                 }
@@ -109,6 +111,7 @@ testModule =
               WatFunction
                 { funcName = "test",
                   funcParams = [],
+                  funcLocals = [],
                   funcResults = [I64],
                   funcBody = [I64Const 0]
                 }

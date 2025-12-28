@@ -91,14 +91,21 @@ export interface HeapAllocator {
 
 /**
  * Create a heap allocator for testing.
+ * 
+ * Memory layout (canonical):
+ * - 0x0000-0x0FFF: Null trap zone
+ * - 0x1000-0x1FFF: Runtime globals
+ * - 0x2000-0x3FFF: Reference tables
+ * - 0x4000+: Heap (grows UP)
+ * - (top): Stack (grows DOWN)
  */
 export function createHeapAllocator(size: number = 1024 * 1024): HeapAllocator {
   const buffer = new ArrayBuffer(size);
   const view = new DataView(buffer);
   return {
     view,
-    heapPtr: 0x10000, // Start after reserved regions
-    heapEnd: size,
+    heapPtr: 0x4000, // Heap starts at 0x4000, grows UP
+    heapEnd: size,   // Stack will grow DOWN from here
   };
 }
 
