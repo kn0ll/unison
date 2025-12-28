@@ -1,4 +1,4 @@
--- | Tests for WAT emission (Phase 1).
+-- | Tests for WAT emission.
 module Unison.Test.Wasm.Emit where
 
 import Data.List (isInfixOf)
@@ -11,14 +11,14 @@ test =
     [ testValTypes,
       testInstructions,
       testFunction,
-      testModule,
-      testIncrement
+      testModule
     ]
 
 testValTypes :: Test ()
 testValTypes =
   scope "valTypes" . tests $
-    [ scope "i64" $ expectEqual (emitValType I64) "i64"
+    [ scope "i64" $ expectEqual (emitValType I64) "i64",
+      scope "f64" $ expectEqual (emitValType F64) "f64"
     ]
 
 testInstructions :: Test ()
@@ -26,6 +26,7 @@ testInstructions =
   scope "instructions" . tests $
     [ scope "local.get" $ expectEqual (emitInstr (LocalGet "n")) "local.get $n",
       scope "local.get_x" $ expectEqual (emitInstr (LocalGet "x")) "local.get $x",
+      scope "local.set" $ expectEqual (emitInstr (LocalSet "n")) "local.set $n",
       scope "i64.const_0" $ expectEqual (emitInstr (I64Const 0)) "i64.const 0",
       scope "i64.const_1" $ expectEqual (emitInstr (I64Const 1)) "i64.const 1",
       scope "i64.const_42" $ expectEqual (emitInstr (I64Const 42)) "i64.const 42",
@@ -35,6 +36,8 @@ testInstructions =
       scope "i64.mul" $ expectEqual (emitInstr I64Mul) "i64.mul",
       scope "i64.div_u" $ expectEqual (emitInstr I64DivU) "i64.div_u",
       scope "i64.div_s" $ expectEqual (emitInstr I64DivS) "i64.div_s",
+      scope "i64.rem_u" $ expectEqual (emitInstr I64RemU) "i64.rem_u",
+      scope "i64.rem_s" $ expectEqual (emitInstr I64RemS) "i64.rem_s",
       scope "i64.eq" $ expectEqual (emitInstr I64Eq) "i64.eq",
       scope "i64.ne" $ expectEqual (emitInstr I64Ne) "i64.ne",
       scope "i64.lt_u" $ expectEqual (emitInstr I64LtU) "i64.lt_u",
@@ -44,60 +47,78 @@ testInstructions =
       scope "i64.gt_u" $ expectEqual (emitInstr I64GtU) "i64.gt_u",
       scope "i64.gt_s" $ expectEqual (emitInstr I64GtS) "i64.gt_s",
       scope "i64.ge_u" $ expectEqual (emitInstr I64GeU) "i64.ge_u",
-      scope "i64.ge_s" $ expectEqual (emitInstr I64GeS) "i64.ge_s"
+      scope "i64.ge_s" $ expectEqual (emitInstr I64GeS) "i64.ge_s",
+      scope "f64.const" $ expectEqual (emitInstr (F64Const 3.14)) "f64.const 3.14",
+      scope "f64.add" $ expectEqual (emitInstr F64Add) "f64.add",
+      scope "f64.sub" $ expectEqual (emitInstr F64Sub) "f64.sub",
+      scope "f64.mul" $ expectEqual (emitInstr F64Mul) "f64.mul",
+      scope "f64.div" $ expectEqual (emitInstr F64Div) "f64.div",
+      scope "call" $ expectEqual (emitInstr (Call "myFunc")) "call $myFunc",
+      scope "return" $ expectEqual (emitInstr Return) "return",
+      scope "br" $ expectEqual (emitInstr (Br "loop")) "br $loop",
+      scope "br_if" $ expectEqual (emitInstr (BrIf "exit")) "br_if $exit"
     ]
 
 testFunction :: Test ()
 testFunction =
   scope "function" . tests $
-    [ scope "simple" $ do
+    [ scope "simple_add" $ do
         let func =
               WatFunction
                 { funcName = "add",
-                  funcParams = [("a", I64), ("b", I64)],                  funcLocals = [],                  funcResults = [I64],
+                  funcParams = [("a", I64), ("b", I64)],
+                  funcLocals = [],
+                  funcResults = [I64],
                   funcBody = [LocalGet "a", LocalGet "b", I64Add]
                 }
         let wat = emitFunction func
-        expect ("func $add" `isInfixOf` wat),
-      scope "params" $ do
+        expect ("func $add" `isInfixOf` wat)
+        expect ("param $a i64" `isInfixOf` wat)
+        expect ("param $b i64" `isInfixOf` wat)
+        expect ("result i64" `isInfixOf` wat)
+        expect ("local.get $a" `isInfixOf` wat)
+        expect ("i64.add" `isInfixOf` wat),
+      scope "with_locals" $ do
         let func =
               WatFunction
-                { funcName = "test",
+                { funcName = "withLocal",
                   funcParams = [("x", I64)],
-                  funcLocals = [],
-                  funcResults = [],
-                  funcBody = []
-                }
-        let wat = emitFunction func
-        expect ("param $x i64" `isInfixOf` wat),
-      scope "results" $ do
-        let func =
-              WatFunction
-                { funcName = "test",
-                  funcParams = [],
-                  funcLocals = [],
+                  funcLocals = [("tmp", I64)],
                   funcResults = [I64],
-                  funcBody = []
+                  funcBody = [LocalGet "x", LocalSet "tmp", LocalGet "tmp"]
                 }
         let wat = emitFunction func
-        expect ("result i64" `isInfixOf` wat),
-      scope "body" $ do
+        expect ("local $tmp i64" `isInfixOf` wat),
+      scope "no_params" $ do
         let func =
               WatFunction
-                { funcName = "test",
+                { funcName = "const42",
                   funcParams = [],
                   funcLocals = [],
                   funcResults = [I64],
                   funcBody = [I64Const 42]
                 }
         let wat = emitFunction func
-        expect ("i64.const 42" `isInfixOf` wat)
+        expect ("func $const42" `isInfixOf` wat)
+        expect ("i64.const 42" `isInfixOf` wat),
+      scope "no_result" $ do
+        let func =
+              WatFunction
+                { funcName = "noop",
+                  funcParams = [],
+                  funcLocals = [],
+                  funcResults = [],
+                  funcBody = []
+                }
+        let wat = emitFunction func
+        expect ("func $noop" `isInfixOf` wat)
+        expect (not $ "result" `isInfixOf` wat)
     ]
 
 testModule :: Test ()
 testModule =
   scope "module" . tests $
-    [ scope "wrapping" $ do
+    [ scope "empty" $ do
         let m =
               WatModule
                 { moduleFunctions = [],
@@ -106,10 +127,10 @@ testModule =
         let wat = emitModule m
         expect ("(module" `isInfixOf` wat)
         expect (")" `isInfixOf` wat),
-      scope "exports" $ do
+      scope "with_export" $ do
         let func =
               WatFunction
-                { funcName = "test",
+                { funcName = "myFunc",
                   funcParams = [],
                   funcLocals = [],
                   funcResults = [I64],
@@ -118,37 +139,22 @@ testModule =
         let m =
               WatModule
                 { moduleFunctions = [func],
-                  moduleExports = ["test"]
+                  moduleExports = ["myFunc"]
                 }
         let wat = emitModule m
-        expect ("export \"test\"" `isInfixOf` wat)
-        expect ("func $test" `isInfixOf` wat)
-    ]
-
-testIncrement :: Test ()
-testIncrement =
-  scope "increment" . tests $
-    [ scope "function_name" $ do
-        expectEqual (funcName incrementFunction) "increment",
-      scope "params" $ do
-        expectEqual (funcParams incrementFunction) [("n", I64)],
-      scope "results" $ do
-        expectEqual (funcResults incrementFunction) [I64],
-      scope "body" $ do
-        expectEqual (funcBody incrementFunction) [LocalGet "n", I64Const 1, I64Add],
-      scope "module_exports" $ do
-        expectEqual (moduleExports incrementModule) ["increment"],
-      scope "module_functions" $ do
-        expectEqual (length (moduleFunctions incrementModule)) 1,
-      scope "wat_output" $ do
-        let wat = emitModule incrementModule
-        -- Verify the WAT contains expected structure
-        expect ("(module" `isInfixOf` wat)
-        expect ("func $increment" `isInfixOf` wat)
-        expect ("param $n i64" `isInfixOf` wat)
-        expect ("result i64" `isInfixOf` wat)
-        expect ("local.get $n" `isInfixOf` wat)
-        expect ("i64.const 1" `isInfixOf` wat)
-        expect ("i64.add" `isInfixOf` wat)
-        expect ("export \"increment\"" `isInfixOf` wat)
+        expect ("export \"myFunc\"" `isInfixOf` wat)
+        expect ("func $myFunc" `isInfixOf` wat),
+      scope "multiple_functions" $ do
+        let f1 = WatFunction "f1" [] [] [I64] [I64Const 1]
+            f2 = WatFunction "f2" [] [] [I64] [I64Const 2]
+        let m =
+              WatModule
+                { moduleFunctions = [f1, f2],
+                  moduleExports = ["f1", "f2"]
+                }
+        let wat = emitModule m
+        expect ("func $f1" `isInfixOf` wat)
+        expect ("func $f2" `isInfixOf` wat)
+        expect ("export \"f1\"" `isInfixOf` wat)
+        expect ("export \"f2\"" `isInfixOf` wat)
     ]

@@ -29,7 +29,6 @@ executables:
         other-modules: Paths_unison_wasm
     dependencies:
       - base
-      - text
       - unison-core1
       - unison-parser-typechecker
       - unison-runtime
@@ -48,10 +47,12 @@ tests:
       - base
       - code-page
       - easytest
-      - text
+      - process
+      - temporary
       - unison-core1
       - unison-parser-typechecker
       - unison-runtime
+      - unison-syntax
       - unison-wasm
 
 default-extensions:

@@ -10,13 +10,15 @@ import System.IO.CodePage (withCP65001)
 import Unison.Test.Wasm.ABI qualified as ABI
 import Unison.Test.Wasm.Compile qualified as Compile
 import Unison.Test.Wasm.Emit qualified as Emit
+import Unison.Test.Wasm.Integration qualified as Integration
 
 test :: Test ()
 test =
   tests
     [ ABI.test,
       Compile.test,
-      Emit.test
+      Emit.test,
+      Integration.test
     ]
 
 main :: IO ()

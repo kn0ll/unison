@@ -66,29 +66,35 @@ import {
   allocData2,
   allocDataG,
   allocPAp,
-  allocCaptured,
   allocForeign,
   allocText,
   allocBytes,
   allocSequence,
   natSlot,
-  intSlot,
-  floatSlot,
   charSlot,
   boxedSlot,
 
   // Debug
-  decodeTypedSlot,
   decodeObject,
   formatObject,
-  inspectMemory,
   hexDump,
-} from '../dist/index.js';
+} from '../index.js';
+
+import type { HeapAllocator } from '../wasm-alloc.js';
+import type {
+  DecodedDataData,
+  DecodedPApData,
+  DecodedForeignData,
+  DecodedTextData,
+  DecodedBytesData,
+  DecodedSequenceData,
+  DecodedEnumData,
+} from '../wasm-debug.js';
 
 // Test allocator
-let alloc;
+let alloc: HeapAllocator;
 
-function resetMemory() {
+function resetMemory(): void {
   alloc = createHeapAllocator(1024 * 1024); // 1MB for tests
 }
 
@@ -321,7 +327,8 @@ describe('Enum Allocation', () => {
   it('stores typeRef correctly', () => {
     const ptr = allocEnum(alloc, 0xDEADBEEF, 0);
     const obj = decodeObject(alloc.view, ptr);
-    assert.equal(obj.data.typeRef, 0xDEADBEEF);
+    const data = obj.data as DecodedEnumData;
+    assert.equal(data.typeRef, 0xDEADBEEF);
   });
 
   it('is 8-byte aligned', () => {
@@ -348,10 +355,11 @@ describe('Data1 Allocation', () => {
   it('stores field0 correctly', () => {
     const ptr = allocData1(alloc, 0x100, 0, natSlot(42n));
     const obj = decodeObject(alloc.view, ptr);
-    assert.ok(obj.data.fields);
-    assert.equal(obj.data.fields.length, 1);
-    assert.equal(obj.data.fields[0].tag, TYPE_NAT);
-    assert.equal(obj.data.fields[0].payload, 42n);
+    const data = obj.data as DecodedDataData;
+    assert.ok(data.fields);
+    assert.equal(data.fields.length, 1);
+    assert.equal(data.fields[0]?.tag, TYPE_NAT);
+    assert.equal(data.fields[0]?.payload, 42n);
   });
 });
 
@@ -373,10 +381,11 @@ describe('Data2 Allocation', () => {
   it('stores both fields correctly', () => {
     const ptr = allocData2(alloc, 0x100, 0, natSlot(10n), natSlot(20n));
     const obj = decodeObject(alloc.view, ptr);
-    assert.ok(obj.data.fields);
-    assert.equal(obj.data.fields.length, 2);
-    assert.equal(obj.data.fields[0].payload, 10n);
-    assert.equal(obj.data.fields[1].payload, 20n);
+    const data = obj.data as DecodedDataData;
+    assert.ok(data.fields);
+    assert.equal(data.fields.length, 2);
+    assert.equal(data.fields[0]?.payload, 10n);
+    assert.equal(data.fields[1]?.payload, 20n);
   });
 });
 
@@ -399,11 +408,12 @@ describe('DataG Allocation', () => {
     const fields = [natSlot(10n), natSlot(20n), natSlot(30n)];
     const ptr = allocDataG(alloc, 0x100, 0, fields);
     const obj = decodeObject(alloc.view, ptr);
-    assert.ok(obj.data.fields);
-    assert.equal(obj.data.fields.length, 3);
-    assert.equal(obj.data.fields[0].payload, 10n);
-    assert.equal(obj.data.fields[1].payload, 20n);
-    assert.equal(obj.data.fields[2].payload, 30n);
+    const data = obj.data as DecodedDataData;
+    assert.ok(data.fields);
+    assert.equal(data.fields.length, 3);
+    assert.equal(data.fields[0]?.payload, 10n);
+    assert.equal(data.fields[1]?.payload, 20n);
+    assert.equal(data.fields[2]?.payload, 30n);
   });
 });
 
@@ -426,8 +436,9 @@ describe('PAp Allocation', () => {
     const args = [natSlot(100n), natSlot(200n)];
     const ptr = allocPAp(alloc, 0x1000, 0, 3, args);
     const obj = decodeObject(alloc.view, ptr);
-    assert.ok(obj.data.args);
-    assert.equal(obj.data.args.length, 2);
+    const data = obj.data as DecodedPApData;
+    assert.ok(data.args);
+    assert.equal(data.args.length, 2);
   });
 });
 
@@ -449,7 +460,8 @@ describe('Foreign Allocation', () => {
   it('stores handleId correctly', () => {
     const ptr = allocForeign(alloc, 0x12345678);
     const obj = decodeObject(alloc.view, ptr);
-    assert.equal(obj.data.handleId, 0x12345678);
+    const data = obj.data as DecodedForeignData;
+    assert.equal(data.handleId, 0x12345678);
   });
 });
 
@@ -471,13 +483,15 @@ describe('Text Allocation', () => {
   it('stores UTF-8 data correctly', () => {
     const ptr = allocText(alloc, 'hello');
     const obj = decodeObject(alloc.view, ptr);
-    assert.equal(obj.data.content, 'hello');
+    const data = obj.data as DecodedTextData;
+    assert.equal(data.content, 'hello');
   });
 
   it('handles Unicode correctly', () => {
     const ptr = allocText(alloc, '你好');
     const obj = decodeObject(alloc.view, ptr);
-    assert.equal(obj.data.content, '你好');
+    const data = obj.data as DecodedTextData;
+    assert.equal(data.content, '你好');
   });
 });
 
@@ -500,7 +514,8 @@ describe('Bytes Allocation', () => {
     const data = new Uint8Array([0xDE, 0xAD, 0xBE, 0xEF]);
     const ptr = allocBytes(alloc, data);
     const obj = decodeObject(alloc.view, ptr);
-    assert.deepEqual(obj.data.bytes, [0xDE, 0xAD, 0xBE, 0xEF]);
+    const objData = obj.data as DecodedBytesData;
+    assert.deepEqual(objData.bytes, [0xDE, 0xAD, 0xBE, 0xEF]);
   });
 });
 
@@ -523,8 +538,9 @@ describe('Sequence Allocation', () => {
     const elements = [natSlot(10n), natSlot(20n), natSlot(30n)];
     const ptr = allocSequence(alloc, elements);
     const obj = decodeObject(alloc.view, ptr);
-    assert.ok(obj.data.elements);
-    assert.equal(obj.data.elements.length, 3);
+    const data = obj.data as DecodedSequenceData;
+    assert.ok(data.elements);
+    assert.equal(data.elements.length, 3);
   });
 });
 
@@ -570,11 +586,15 @@ describe('Complex Object Graphs', () => {
 
     const outerObj = decodeObject(alloc.view, outer);
     assert.equal(outerObj.objTag, OBJ_DATA1);
-    assert.equal(outerObj.data.fields[0].tag, TYPE_BOXED);
+    const outerData = outerObj.data as DecodedDataData;
+    assert.equal(outerData.fields[0]?.tag, TYPE_BOXED);
 
-    const innerObj = decodeObject(alloc.view, Number(outerObj.data.fields[0].payload));
+    const innerPtr = outerData.fields[0]?.payload;
+    assert.ok(innerPtr !== undefined);
+    const innerObj = decodeObject(alloc.view, Number(innerPtr));
     assert.equal(innerObj.objTag, OBJ_DATA1);
-    assert.equal(innerObj.data.fields[0].payload, 42n);
+    const innerData = innerObj.data as DecodedDataData;
+    assert.equal(innerData.fields[0]?.payload, 42n);
   });
 
   it('allocates PAp with boxed args', () => {
@@ -585,10 +605,12 @@ describe('Complex Object Graphs', () => {
     const obj = decodeObject(alloc.view, pap);
 
     assert.equal(obj.objTag, OBJ_PAP);
+    const data = obj.data as DecodedPApData;
 
     // Verify the captured args point to valid objects
-    const arg0Ptr = Number(obj.data.args[0].payload);
-    const arg0Obj = decodeObject(alloc.view, arg0Ptr);
+    const arg0Ptr = data.args[0]?.payload;
+    assert.ok(arg0Ptr !== undefined);
+    const arg0Obj = decodeObject(alloc.view, Number(arg0Ptr));
     assert.equal(arg0Obj.objTag, OBJ_ENUM);
   });
 });

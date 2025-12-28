@@ -1,7 +1,8 @@
--- | WAT (WebAssembly Text Format) emitter for Phase 1.
+-- | WAT (WebAssembly Text Format) emitter.
 --
--- This module provides functions to emit WAT text format for basic WASM instructions.
--- Phase 1 only supports unboxed i64 operations with no heap allocation.
+-- This module provides functions to emit WAT text format for WASM instructions.
+-- The WatInstr/WatFunction/WatModule types serve as an intermediate representation
+-- between SuperGroup compilation and WAT text output.
 module Unison.Wasm.Emit
   ( -- * WAT Types
     WatModule (..),
@@ -14,22 +15,18 @@ module Unison.Wasm.Emit
     emitFunction,
     emitInstr,
     emitValType,
-
-    -- * Hardcoded Functions (Phase 1)
-    incrementModule,
-    incrementFunction,
   )
 where
 
 import Data.Word (Word64)
 
--- | WASM value types (Phase 2: i64 for integers, f64 for floats)
+-- | WASM value types
 data WatValType
   = I64
   | F64
   deriving (Eq, Show)
 
--- | WASM instructions (Phase 1-2 subset: arithmetic and control)
+-- | WASM instructions (subset needed for current phases)
 data WatInstr
   = -- | Get a local variable: @local.get $name@
     LocalGet String
@@ -231,41 +228,3 @@ emitModule m =
   where
     emitExport name =
       "  (export \"" ++ name ++ "\" (func $" ++ name ++ "))"
-
---------------------------------------------------------------------------------
--- Hardcoded Functions (Phase 1)
---------------------------------------------------------------------------------
-
--- | The hardcoded @increment@ function: @increment n = n + 1@
---
--- Corresponds to Unison:
--- @
--- increment : Nat -> Nat
--- increment n = n + 1
--- @
---
--- And SuperNormal (approximately):
--- @
--- Lambda [UN] (TLets Direct [(result, UN)] (TPrm ADDN [n, 1]) (TVar result))
--- @
-incrementFunction :: WatFunction
-incrementFunction =
-  WatFunction
-    { funcName = "increment",
-      funcParams = [("n", I64)],
-      funcLocals = [],
-      funcResults = [I64],
-      funcBody =
-        [ LocalGet "n",
-          I64Const 1,
-          I64Add
-        ]
-    }
-
--- | A complete module exporting just the @increment@ function
-incrementModule :: WatModule
-incrementModule =
-  WatModule
-    { moduleFunctions = [incrementFunction],
-      moduleExports = ["increment"]
-    }

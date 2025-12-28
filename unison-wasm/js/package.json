@@ -19,11 +19,12 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "tsc && node --test tests/",
-    "test:watch": "tsc && node --test --watch tests/",
+    "test": "tsc && node --test 'dist/tests/**/*.test.js'",
+    "test:watch": "tsc && node --test --watch 'dist/tests/**/*.test.js'",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@types/node": "^25.0.3",
     "typescript": "^5.3.0",
     "wabt": "^1.0.36"
   },

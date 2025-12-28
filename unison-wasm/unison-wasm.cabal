@@ -100,7 +100,6 @@ executable unison-wasm-poc
   ghc-options: -fmax-worker-args=100 -Wall -funbox-strict-fields -O2 -threaded -rtsopts "-with-rtsopts=-N"
   build-depends:
       base
-    , text
     , unison-core1
     , unison-parser-typechecker
     , unison-runtime
@@ -115,6 +114,7 @@ test-suite wasm-tests
       Unison.Test.Wasm.ABI
       Unison.Test.Wasm.Compile
       Unison.Test.Wasm.Emit
+      Unison.Test.Wasm.Integration
   hs-source-dirs:
       tests
   default-extensions:
@@ -152,9 +152,11 @@ test-suite wasm-tests
       base
     , code-page
     , easytest
-    , text
+    , process
+    , temporary
     , unison-core1
     , unison-parser-typechecker
     , unison-runtime
+    , unison-syntax
     , unison-wasm
   default-language: Haskell2010
