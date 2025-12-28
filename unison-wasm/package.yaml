@@ -1,0 +1,59 @@
+name: unison-wasm
+github: unisonweb/unison
+copyright: Copyright (C) 2013-2024 Unison Computing, PBC and contributors
+
+ghc-options: -fmax-worker-args=100 -Wall -funbox-strict-fields -O2
+
+library:
+  source-dirs: src
+  when:
+    - condition: false
+      other-modules: Paths_unison_wasm
+
+  dependencies:
+    - base
+
+tests:
+  wasm-tests:
+    source-dirs: tests
+    main: Suite.hs
+    ghc-options: -W -threaded -rtsopts "-with-rtsopts=-N -T" -v0
+    when:
+      - condition: false
+        other-modules: Paths_unison_wasm
+    dependencies:
+      - base
+      - code-page
+      - easytest
+      - unison-wasm
+
+default-extensions:
+  - ApplicativeDo
+  - BangPatterns
+  - BlockArguments
+  - DeriveAnyClass
+  - DeriveFunctor
+  - DeriveGeneric
+  - DeriveTraversable
+  - DerivingStrategies
+  - DerivingVia
+  - DoAndIfThenElse
+  - DuplicateRecordFields
+  - FlexibleContexts
+  - FlexibleInstances
+  - GeneralizedNewtypeDeriving
+  - ImportQualifiedPost
+  - LambdaCase
+  - MultiParamTypeClasses
+  - NamedFieldPuns
+  - OverloadedLabels
+  - OverloadedRecordDot
+  - OverloadedStrings
+  - PatternSynonyms
+  - RankNTypes
+  - ScopedTypeVariables
+  - StandaloneDeriving
+  - TupleSections
+  - TypeApplications
+  - TypeFamilies
+  - ViewPatterns

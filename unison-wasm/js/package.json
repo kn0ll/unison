@@ -1,0 +1,36 @@
+{
+  "name": "@unison/wasm-runtime",
+  "version": "0.1.0",
+  "description": "JavaScript runtime for Unison WASM backend",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./abi-constants": "./dist/abi-constants.js",
+    "./wasm-alloc": "./dist/wasm-alloc.js",
+    "./wasm-debug": "./dist/wasm-debug.js",
+    "./errors": "./dist/errors.js"
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "dist/**/*.js.map"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "tsc && node --test tests/",
+    "test:watch": "tsc && node --test --watch tests/",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0"
+  },
+  "keywords": [
+    "unison",
+    "wasm",
+    "webassembly",
+    "runtime"
+  ],
+  "license": "MIT"
+}

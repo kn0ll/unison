@@ -47,6 +47,7 @@ packages:
   - unison-share-api
   - unison-share-projects-api
   - unison-syntax
+  - unison-wasm
   - yaks/easytest
 
 extra-deps:
