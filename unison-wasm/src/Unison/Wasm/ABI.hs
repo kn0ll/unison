@@ -159,6 +159,19 @@ module Unison.Wasm.ABI
     kPushSize,
     kMarkSize,
 
+    -- * DEnv (Dynamic Handler Environment) Constants
+    denvEntrySize,
+    denvMaxEntries,
+    denvCountOffset,
+    denvEntriesOffset,
+    denvEntryKeyOffset,
+    denvEntryValueOffset,
+    denvBaseSize,
+    denvSize,
+
+    -- * TypedSlot Offset Helper
+    slotPayloadOffset,
+
     -- * Alignment
     align8,
 
@@ -693,3 +706,53 @@ memoryRefTablesEnd = 0x3FFF
 -- | Heap start - grows UP from here
 memoryHeapStart :: Word32
 memoryHeapStart = 0x4000
+
+-- -----------------------------------------------------------------------------
+-- DEnv (Dynamic Handler Environment) Constants
+-- -----------------------------------------------------------------------------
+-- DEnv is a simple array-based map from ability reference (u32) to handler pointer (u32).
+-- Layout:
+--   bytes 0-3:  count (u32) - number of entries
+--   bytes 4+:   entries array, each entry is 8 bytes (key: u32, value: u32)
+
+-- | Size of each DEnv entry (key + value)
+denvEntrySize :: Word32
+denvEntrySize = 8
+
+-- | Maximum number of entries in a DEnv (for MVP)
+denvMaxEntries :: Word32
+denvMaxEntries = 16
+
+-- | Offset to entry count
+denvCountOffset :: Word32
+denvCountOffset = 0
+
+-- | Offset to entries array
+denvEntriesOffset :: Word32
+denvEntriesOffset = 4
+
+-- | Offset within entry to key
+denvEntryKeyOffset :: Word32
+denvEntryKeyOffset = 0
+
+-- | Offset within entry to value (handler ptr)
+denvEntryValueOffset :: Word32
+denvEntryValueOffset = 4
+
+-- | Base size of DEnv (just count field)
+denvBaseSize :: Word32
+denvBaseSize = 4
+
+-- | Calculate DEnv size for N entries
+denvSize :: Word32 -> Word32
+denvSize entryCount = align8 (denvBaseSize + entryCount * denvEntrySize)
+
+-- -----------------------------------------------------------------------------
+-- TypedSlot Helper
+-- -----------------------------------------------------------------------------
+
+-- | Calculate offset to payload within a TypedSlot at a given index
+-- Usage: slotPayloadOffset baseOffset slotIndex
+slotPayloadOffset :: Word32 -> Word32 -> Word32
+slotPayloadOffset baseOffset slotIndex =
+  baseOffset + slotIndex * typedSlotSize + 8 -- +8 to skip TypeTag

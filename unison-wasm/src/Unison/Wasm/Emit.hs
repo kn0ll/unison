@@ -106,6 +106,8 @@ data WatInstr
     I32Load16U Word32  -- offset
   | -- | Store low 8 bits of i32 to memory: @i32.store8 offset=n@
     I32Store8 Word32  -- offset
+  | -- | Store low 16 bits of i32 to memory: @i32.store16 offset=n@
+    I32Store16 Word32  -- offset
 
   -- i64 operations
   | -- | i64 constant: @i64.const n@
@@ -186,10 +188,14 @@ data WatInstr
     If WatValType [WatInstr] [WatInstr]
   | -- | If without result (for side effects only)
     IfVoid [WatInstr] [WatInstr]
-  | -- | Block for structured control flow
+  | -- | Block for structured control flow (no result)
     Block String [WatInstr]
+  | -- | Block with result type
+    BlockResult String WatValType [WatInstr]
   | -- | Loop for structured control flow
     Loop String [WatInstr]
+  | -- | i32 test for zero: @i32.eqz@
+    I32Eqz
   | -- | Branch to label: @br $label@
     Br String
   | -- | Conditional branch: @br_if $label@
@@ -279,6 +285,7 @@ emitInstr (I64Store offset) = "i64.store offset=" ++ show offset
 emitInstr (I32Load8U offset) = "i32.load8_u offset=" ++ show offset
 emitInstr (I32Load16U offset) = "i32.load16_u offset=" ++ show offset
 emitInstr (I32Store8 offset) = "i32.store8 offset=" ++ show offset
+emitInstr (I32Store16 offset) = "i32.store16 offset=" ++ show offset
 
 -- i64 operations
 emitInstr (I64Const n) = "i64.const " ++ show n
@@ -338,11 +345,17 @@ emitInstr (Block label instrs) =
     ["block $" ++ label]
       ++ map (("  " ++) . emitInstr) instrs
       ++ ["end"]
+emitInstr (BlockResult label resultTy instrs) =
+  unlines $
+    ["block $" ++ label ++ " (result " ++ emitValType resultTy ++ ")"]
+      ++ map (("  " ++) . emitInstr) instrs
+      ++ ["end"]
 emitInstr (Loop label instrs) =
   unlines $
     ["loop $" ++ label]
       ++ map (("  " ++) . emitInstr) instrs
       ++ ["end"]
+emitInstr I32Eqz = "i32.eqz"
 emitInstr (Br label) = "br $" ++ label
 emitInstr (BrIf label) = "br_if $" ++ label
 emitInstr (BrTable labels dflt) =

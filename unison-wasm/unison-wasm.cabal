@@ -57,6 +57,7 @@ library
   ghc-options: -fmax-worker-args=100 -Wall -funbox-strict-fields -O2
   build-depends:
       base
+    , bytestring
     , containers
     , text
     , unison-core1
@@ -114,8 +115,10 @@ test-suite wasm-tests
   main-is: Suite.hs
   other-modules:
       Unison.Test.Wasm.ABI
+      Unison.Test.Wasm.Abilities
       Unison.Test.Wasm.Compile
       Unison.Test.Wasm.Emit
+      Unison.Test.Wasm.Fixtures
       Unison.Test.Wasm.Integration
   hs-source-dirs:
       tests
@@ -153,9 +156,12 @@ test-suite wasm-tests
   build-depends:
       base
     , code-page
+    , directory
     , easytest
+    , filepath
     , process
     , temporary
+    , text
     , unison-core1
     , unison-parser-typechecker
     , unison-runtime

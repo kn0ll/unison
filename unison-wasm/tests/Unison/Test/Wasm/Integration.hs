@@ -187,7 +187,8 @@ test =
       testDivisionByZero,
       testClosures,
       testSumTypes,
-      testPartialReturn
+      testPartialReturn,
+      testDataTypes
     ]
 
 --------------------------------------------------------------------------------
@@ -721,4 +722,58 @@ testPartialReturn =
           , "partial12 5"
           ])
         (WasmI64 35)
+    ]
+
+--------------------------------------------------------------------------------
+-- Phase 5 Tests: Data Types and Abilities
+--------------------------------------------------------------------------------
+-- Tests for Phase 5 features. Note: Full ability tests require THnd/TShift
+-- which are now compiled but need end-to-end testing with proper Unison
+-- source that uses `handle` and ability operations.
+--
+-- The current tests verify that the Phase 5 compiler changes don't break
+-- existing functionality. True ability tests would require parsing
+-- `handle` and ability requests, which needs integration with UCM.
+
+testDataTypes :: Test ()
+testDataTypes =
+  scope "phase5" . tests $
+    [
+      -- Verify pattern matching still works after Phase 5 changes
+      testE2E "match_zero_phase5"
+        (intercalate "\n"
+          [ "let"
+          , "f n = match n with"
+          , "  0 -> 42"
+          , "  _ -> 99"
+          , "f 0"
+          ])
+        (WasmI64 42),
+
+      -- Multi-case match - tests compileIfElseChain
+      testE2E "match_multi_phase5"
+        (intercalate "\n"
+          [ "let"
+          , "classify x = match x with"
+          , "  0 -> 0"
+          , "  1 -> 10"
+          , "  2 -> 20"
+          , "  3 -> 30"
+          , "  _ -> 99"
+          , "##Nat.+ (classify 2) (classify 3)"
+          ])
+        (WasmI64 50),
+
+      -- Nested closures with matching - stress test
+      testE2E "closure_match_combo"
+        (intercalate "\n"
+          [ "let"
+          , "selector = x -> match x with"
+          , "  0 -> 1"
+          , "  1 -> 2"
+          , "  _ -> 0"
+          , "apply f y = f y"
+          , "##Nat.+ (apply selector 0) (apply selector 1)"
+          ])
+        (WasmI64 3)
     ]

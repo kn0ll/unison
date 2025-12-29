@@ -12,6 +12,7 @@ library:
 
   dependencies:
     - base
+    - bytestring
     - containers
     - text
     - unison-hash
@@ -46,9 +47,12 @@ tests:
     dependencies:
       - base
       - code-page
+      - directory
       - easytest
+      - filepath
       - process
       - temporary
+      - text
       - unison-core1
       - unison-parser-typechecker
       - unison-runtime

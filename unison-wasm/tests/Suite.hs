@@ -8,16 +8,20 @@ import System.Environment (getArgs)
 import System.IO
 import System.IO.CodePage (withCP65001)
 import Unison.Test.Wasm.ABI qualified as ABI
+import Unison.Test.Wasm.Abilities qualified as Abilities
 import Unison.Test.Wasm.Compile qualified as Compile
 import Unison.Test.Wasm.Emit qualified as Emit
+import Unison.Test.Wasm.Fixtures qualified as Fixtures
 import Unison.Test.Wasm.Integration qualified as Integration
 
 test :: Test ()
 test =
   tests
     [ ABI.test,
+      Abilities.test,
       Compile.test,
       Emit.test,
+      Fixtures.test,
       Integration.test
     ]
 
