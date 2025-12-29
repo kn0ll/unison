@@ -128,9 +128,11 @@ else
 
 (module
   ;; Import foreign functions from JS host
-  ;; These map to IO.console.printLine in Unison
+  ;; These implement Unison's IO abilities in JavaScript
   (import "unison" "IO.printLine" (func $IO.printLine (param i64)))
   (import "unison" "IO.printNat" (func $IO.printNat (param i64)))
+  (import "unison" "IO.systemTime" (func $IO.systemTime (result i64)))
+  (import "unison" "IO.delay" (func $IO.delay (param i64)))
 
   (memory (export "memory") 1)
 

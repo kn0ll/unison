@@ -59,6 +59,18 @@ async function loadWasm(): Promise<void> {
         const remainder = cents % 100;
         const formatted = `$${dollars}.${remainder.toString().padStart(2, '0')}`;
         console.log(`[Unison] Price calculated: ${formatted} (${cents} cents)`);
+      },
+      // IO.systemTime - returns current time in microseconds since epoch
+      'IO.systemTime': (): bigint => {
+        return BigInt(Date.now()) * 1000n; // milliseconds → microseconds
+      },
+      // IO.delay - delays for given microseconds (requires async yield/resume for full impl)
+      // For now, this is a sync stub; full async requires WAT to yield control
+      'IO.delay': (microseconds: bigint) => {
+        const ms = Number(microseconds) / 1000;
+        console.log(`[Unison IO.delay] ${ms}ms (sync stub - full async requires yield/resume)`);
+        // Note: Full implementation would yield to JS, setTimeout, then resume
+        // On server, we could use a blocking sleep, but that's not ideal
       }
     }
   };

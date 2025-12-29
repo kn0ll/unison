@@ -60,13 +60,15 @@ The approach: Unison already has abilities and foreign functions. We provide **b
 
 #### Existing Unison Foreign Functions → Browser Implementations
 
-| Unison Foreign Function | Native Implementation | Browser Handler |
-|-------------------------|----------------------|-----------------|
-| `IO_putBytes_impl_v3` (stdout) | Write to file handle | `console.log` |
-| `IO_getLine_impl_v1` (stdin) | Read from handle | `prompt()` or custom input |
-| `IO_delay_impl_v3` | `threadDelay` | `setTimeout` (async, yield/resume) |
-| `IO_systemTime_impl_v3` | System clock | `Date.now()` |
-| `IO_getEnv_impl_v1` | Environment vars | Not available (or mock) |
+| Unison Foreign Function | Native Implementation | Browser Handler | Status |
+|-------------------------|----------------------|-----------------|--------|
+| `IO.printNat` | Print to stdout | `console.log` | ✅ Done |
+| `IO.printLine` | Print to stdout | `console.log` | ✅ Done |
+| `IO.systemTime` | System clock | `Date.now() * 1000` | ✅ Done |
+| `IO.delay` | `threadDelay` | Stub (logs only) | ⏳ Needs yield/resume |
+| `IO_putBytes_impl_v3` (stdout) | Write to file handle | `console.log` | Not started |
+| `IO_getLine_impl_v1` (stdin) | Read from handle | `prompt()` or custom input | Not started |
+| `IO_getEnv_impl_v1` | Environment vars | Not available (or mock) | Not started |
 
 #### Socket → Fetch Mapping (Significant Work)
 

@@ -56,6 +56,15 @@ The same message appears in the server terminal when you click "Verify with Serv
 
 This demonstrates that **abilities (IO effects)** work seamlessly from WASM to JS.
 
+### Supported Foreign Functions
+
+| Unison Function | JS Implementation | Notes |
+|-----------------|-------------------|-------|
+| `IO.printNat` | `console.log(value)` | ✅ Working |
+| `IO.printLine` | `console.log(text)` | ✅ Working (pointer only) |
+| `IO.systemTime` | `Date.now() * 1000` | ✅ Returns microseconds |
+| `IO.delay` | Stub (logs only) | ⏳ Full async requires yield/resume |
+
 ## Project Structure
 
 ```
