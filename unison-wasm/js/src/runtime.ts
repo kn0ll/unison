@@ -1,8 +1,8 @@
 /**
- * Unison WASM Runtime - Phase 6: Foreign Calls
+ * Unison WASM Runtime - Phase 7: Async Foreign Calls
  *
  * This module provides the main runtime class for loading and executing
- * Unison WASM modules with JS interop.
+ * Unison WASM modules with JS interop, including async operations.
  *
  * @module runtime
  */
@@ -25,12 +25,21 @@ import {
   HEADER_OBJTAG_SHIFT,
   HEADER_OBJTAG_MASK,
   OBJ_TAG_NAMES,
+  YIELD_SENTINEL,
   type Ptr32,
   type TypeTag,
   type ObjTag,
 } from './abi-constants.js';
 
 import { ArityError } from './errors.js';
+
+import {
+  ContinuationHandle,
+  AsyncState,
+  NestedAsyncError,
+  InvalidContinuationError,
+  InvalidResumeError,
+} from './continuation.js';
 
 // =============================================================================
 // Types
@@ -54,11 +63,19 @@ export interface UnisonExports {
 }
 
 /**
- * Foreign function definition for registration.
+ * Foreign function definition for registration (sync).
  */
 export interface ForeignDef {
   name: string;
   handler: (runtime: UnisonRuntime, ...args: number[]) => number | void;
+}
+
+/**
+ * Async foreign function definition.
+ */
+export interface AsyncForeignDef {
+  name: string;
+  handler: (runtime: UnisonRuntime, ...args: number[]) => Promise<bigint>;
 }
 
 // =============================================================================
@@ -128,9 +145,10 @@ export class ForeignHandleTable {
  *
  * Provides:
  * - WASM module loading
- * - Foreign function dispatch
+ * - Foreign function dispatch (sync and async)
  * - Memory access (getText, getBytes)
  * - Apply protocol for closures
+ * - Async yield/resume for IO operations
  * - Debug utilities
  */
 export class UnisonRuntime {
@@ -140,11 +158,34 @@ export class UnisonRuntime {
   /** Foreign handle table for JS objects */
   readonly handles: ForeignHandleTable = new ForeignHandleTable();
 
-  /** Registered foreign functions */
+  /** Registered sync foreign functions */
   private foreignFuncs: Map<string, ForeignDef['handler']> = new Map();
+
+  /** Registered async foreign functions */
+  private asyncForeignFuncs: Map<string, AsyncForeignDef['handler']> = new Map();
 
   /** Console output captured during execution (for testing) */
   capturedOutput: string[] = [];
+
+  // ===========================================================================
+  // Async State Machine
+  // ===========================================================================
+
+  /** Current async state */
+  private asyncState: AsyncState = AsyncState.Idle;
+
+  /** Monotonically increasing continuation ID counter */
+  private nextContId: bigint = 1n;
+
+  /** Active continuations waiting for resume */
+  private pendingContinuations: Map<bigint, ContinuationHandle> = new Map();
+
+  /** Promise resolve callback for current run() */
+  private resolveRun: ((value: bigint) => void) | null = null;
+
+  /** Promise reject callback for current run() */
+  private rejectRun: ((error: Error) => void) | null = null;
+
 
   // ===========================================================================
   // Module Loading
@@ -220,6 +261,72 @@ export class UnisonRuntime {
       console.log(`[TRACE] ${text}: ${value}`);
       return value;
     };
+
+    // Add async foreign function wrappers
+    this.addAsyncForeignFuncWrappers(ns);
+  }
+
+  /**
+   * Add wrappers for async foreign functions.
+   *
+   * These wrappers:
+   * 1. Allocate a continuation ID
+   * 2. Start the async operation
+   * 3. Return YIELD_SENTINEL to yield to JS
+   * 4. When Promise resolves, resume the continuation
+   */
+  private addAsyncForeignFuncWrappers(ns: Record<string, (...args: any[]) => any>): void {
+    // IO.fetch: (urlPtr: i32) -> Text (async)
+    if (!this.asyncForeignFuncs.has('IO.fetch')) {
+      this.registerAsyncForeign('IO.fetch', async (_runtime, urlPtr: number) => {
+        const url = this.getText(urlPtr);
+        const response = await fetch(url);
+        const text = await response.text();
+        // Allocate text in WASM memory and return pointer
+        // For now, return the length as a placeholder
+        return BigInt(text.length);
+      });
+    }
+
+    // IO.delay: (ms: i64) -> () (async)
+    if (!this.asyncForeignFuncs.has('IO.delay')) {
+      this.registerAsyncForeign('IO.delay', async (_runtime, ms: number) => {
+        await new Promise(resolve => setTimeout(resolve, ms));
+        return 0n; // Unit
+      });
+    }
+
+    // Wire up async functions to namespace
+    for (const [name, handler] of this.asyncForeignFuncs) {
+      const wrapperName = name.replace('.', '_');
+      ns[wrapperName] = (...args: number[]) => {
+        // Check for nested async
+        if (this.asyncState === AsyncState.Yielded) {
+          throw new NestedAsyncError();
+        }
+
+        // Allocate continuation
+        const contId = this.allocContinuation();
+
+        // Start async operation
+        handler(this, ...args)
+          .then(result => {
+            const handle = this.pendingContinuations.get(contId);
+            if (handle && !handle.isConsumed) {
+              handle.resume(result);
+            }
+          })
+          .catch(error => {
+            const handle = this.pendingContinuations.get(contId);
+            if (handle && !handle.isConsumed) {
+              handle.resumeWithError(error instanceof Error ? error : new Error(String(error)));
+            }
+          });
+
+        // Return yield sentinel
+        return YIELD_SENTINEL;
+      };
+    }
   }
 
   // ===========================================================================
@@ -227,19 +334,38 @@ export class UnisonRuntime {
   // ===========================================================================
 
   /**
-   * Register a foreign function that WASM can call.
+   * Register a sync foreign function that WASM can call.
    */
   registerForeign(name: string, handler: ForeignDef['handler']): void {
     this.foreignFuncs.set(name, handler);
   }
 
   /**
-   * Register multiple foreign functions.
+   * Register multiple sync foreign functions.
    */
   registerForeignBatch(defs: ForeignDef[]): void {
     for (const def of defs) {
       this.registerForeign(def.name, def.handler);
     }
+  }
+
+  /**
+   * Register an async foreign function.
+   *
+   * Async foreign functions return a Promise. When called from WASM,
+   * the runtime will yield, wait for the Promise to resolve, then
+   * resume the continuation with the result.
+   */
+  registerAsyncForeign(name: string, handler: AsyncForeignDef['handler']): void {
+    this.asyncForeignFuncs.set(name, handler);
+  }
+
+  /**
+   * Get an async foreign function handler.
+   * @internal
+   */
+  getAsyncForeign(name: string): AsyncForeignDef['handler'] | undefined {
+    return this.asyncForeignFuncs.get(name);
   }
 
   // ===========================================================================
@@ -274,6 +400,181 @@ export class UnisonRuntime {
   callBigInt(funcName: string, ...args: any[]): bigint {
     const result = this.call(funcName, ...args);
     return BigInt(result);
+  }
+
+  // ===========================================================================
+  // Async Execution
+  // ===========================================================================
+
+  /**
+   * Run a function that may perform async operations.
+   *
+   * Returns a Promise that resolves when the computation completes,
+   * which may involve multiple yield/resume cycles for async IO.
+   *
+   * @param funcName - Name of the exported function to call
+   * @param args - Arguments to pass to the function
+   * @returns Promise resolving to the final result
+   */
+  async run(funcName: string, ...args: any[]): Promise<bigint> {
+    // Check for nested async (MVP constraint)
+    if (this.asyncState !== AsyncState.Idle) {
+      throw new NestedAsyncError();
+    }
+
+    return new Promise((resolve, reject) => {
+      this.resolveRun = resolve;
+      this.rejectRun = reject;
+
+      try {
+        const result = this.call(funcName, ...args);
+        const resultBigInt = typeof result === 'bigint' ? result : BigInt(result);
+
+        // Check if the function yielded
+        if (resultBigInt === YIELD_SENTINEL) {
+          // Async operation started, will resume later
+          this.asyncState = AsyncState.Yielded;
+          // Don't resolve yet - wait for resume
+        } else {
+          // Sync completion
+          this.asyncState = AsyncState.Idle;
+          this.resolveRun = null;
+          this.rejectRun = null;
+          resolve(resultBigInt);
+        }
+      } catch (error) {
+        this.asyncState = AsyncState.Idle;
+        this.resolveRun = null;
+        this.rejectRun = null;
+        reject(error);
+      }
+    });
+  }
+
+  /**
+   * Get the current async state.
+   */
+  getAsyncState(): AsyncState {
+    return this.asyncState;
+  }
+
+  /**
+   * Allocate a continuation ID and create a handle.
+   * Called by async foreign functions before yielding.
+   *
+   * @returns The continuation ID for this yield
+   * @internal
+   */
+  allocContinuation(): bigint {
+    const id = this.nextContId++;
+    const handle = new ContinuationHandle(id, this);
+    this.pendingContinuations.set(id, handle);
+    return id;
+  }
+
+  /**
+   * Get the pending continuation handle.
+   * @internal
+   */
+  getPendingContinuation(contId: bigint): ContinuationHandle {
+    const handle = this.pendingContinuations.get(contId);
+    if (!handle) {
+      throw new InvalidContinuationError(contId);
+    }
+    return handle;
+  }
+
+  /**
+   * Resume a yielded computation with a value.
+   * Called by ContinuationHandle.resume().
+   *
+   * @param contId - The continuation ID
+   * @param value - The value to resume with
+   * @internal
+   */
+  resumeInternal(contId: bigint, value: unknown): void {
+    if (this.asyncState !== AsyncState.Yielded) {
+      throw new InvalidResumeError(
+        `Cannot resume: not in Yielded state (current: ${AsyncState[this.asyncState]})`
+      );
+    }
+
+    // Remove from pending
+    this.pendingContinuations.delete(contId);
+
+    // Convert value to i64
+    const wasmValue = this.valueToWasm(value);
+
+    this.asyncState = AsyncState.Resuming;
+
+    try {
+      // Call WASM resume function
+      if (!this.exports || typeof this.exports['__resume'] !== 'function') {
+        throw new Error('__resume export not found');
+      }
+
+      const result = this.exports['__resume'](contId, wasmValue);
+      const resultBigInt = typeof result === 'bigint' ? result : BigInt(result);
+
+      if (resultBigInt === YIELD_SENTINEL) {
+        // Yielded again (sequential async)
+        this.asyncState = AsyncState.Yielded;
+      } else {
+        // Final result
+        this.asyncState = AsyncState.Idle;
+        if (this.resolveRun) {
+          this.resolveRun(resultBigInt);
+          this.resolveRun = null;
+          this.rejectRun = null;
+        }
+      }
+    } catch (error) {
+      this.asyncState = AsyncState.Idle;
+      if (this.rejectRun) {
+        this.rejectRun(error instanceof Error ? error : new Error(String(error)));
+        this.resolveRun = null;
+        this.rejectRun = null;
+      }
+    }
+  }
+
+  /**
+   * Resume a yielded computation with an error.
+   * Called by ContinuationHandle.resumeWithError().
+   *
+   * @param contId - The continuation ID
+   * @param error - The error to propagate
+   * @internal
+   */
+  resumeWithErrorInternal(contId: bigint, error: Error): void {
+    // Remove from pending
+    this.pendingContinuations.delete(contId);
+
+    // Propagate to run() Promise
+    this.asyncState = AsyncState.Idle;
+    if (this.rejectRun) {
+      this.rejectRun(error);
+      this.resolveRun = null;
+      this.rejectRun = null;
+    }
+  }
+
+  /**
+   * Convert a JS value to WASM i64 representation.
+   */
+  private valueToWasm(value: unknown): bigint {
+    if (typeof value === 'bigint') return value;
+    if (typeof value === 'number') return BigInt(Math.floor(value));
+    if (typeof value === 'boolean') return value ? 1n : 0n;
+    if (value === null || value === undefined) return 0n;
+
+    // For objects, allocate a foreign handle
+    if (typeof value === 'object') {
+      const handleId = this.handles.alloc(value);
+      return BigInt(handleId);
+    }
+
+    throw new Error(`Cannot convert ${typeof value} to WASM value`);
   }
 
   // ===========================================================================
@@ -556,11 +857,22 @@ export class UnisonRuntime {
   }
 
   /**
-   * Reset the runtime (clear handles, output, etc.)
+   * Reset the runtime (clear handles, output, async state, etc.)
    */
   reset(): void {
     this.handles.clear();
     this.capturedOutput = [];
+    this.asyncState = AsyncState.Idle;
+    this.pendingContinuations.clear();
+    this.resolveRun = null;
+    this.rejectRun = null;
+  }
+
+  /**
+   * Get count of pending continuations (for testing).
+   */
+  getPendingContinuationCount(): number {
+    return this.pendingContinuations.size;
   }
 }
 

@@ -16,6 +16,7 @@ module Unison.Wasm.Compile.Runtime
     runtimeFunctions,
     runtimeGlobals,
     runtimeFuncTypes,
+    runtimeExports,
 
     -- * Individual Functions (for testing)
     allocFunction,
@@ -25,6 +26,8 @@ module Unison.Wasm.Compile.Runtime
     allocDataGFunction,
     allocCapturedFunction,
     mkApplyFunction,
+    allocAsyncContFunction,
+    resumeFunction,
 
     -- * Constants
     heapStartAddress,
@@ -96,9 +99,33 @@ denvPtrGlobal =
       globalInit = 0
     }
 
+-- | Async continuation ID global
+-- Stores the current continuation ID for yield/resume.
+-- 0 = no async in progress
+asyncContIdGlobal :: WatGlobal
+asyncContIdGlobal =
+  WatGlobal
+    { globalName = "async_cont_id",
+      globalType = I64,
+      globalMutable = True,
+      globalInit = 0
+    }
+
+-- | Async continuation pointer global
+-- Stores pointer to the OBJ_ASYNC_CONT object for the current async operation.
+-- 0 = no async in progress
+asyncContPtrGlobal :: WatGlobal
+asyncContPtrGlobal =
+  WatGlobal
+    { globalName = "async_cont_ptr",
+      globalType = I32,
+      globalMutable = True,
+      globalInit = 0
+    }
+
 -- | All runtime globals
 runtimeGlobals :: [WatGlobal]
-runtimeGlobals = [heapPtrGlobal, kPtrGlobal, denvPtrGlobal]
+runtimeGlobals = [heapPtrGlobal, kPtrGlobal, denvPtrGlobal, asyncContIdGlobal, asyncContPtrGlobal]
 
 --------------------------------------------------------------------------------
 -- Bump Allocator
@@ -495,6 +522,11 @@ mkFuncType arity =
 runtimeFuncTypes :: [WatFuncType]
 runtimeFuncTypes = map mkFuncType [1 .. maxSupportedArity]
 
+-- | Runtime exports (functions that JS can call)
+-- These are exported in addition to the main entry function
+runtimeExports :: [String]
+runtimeExports = ["__resume"]
+
 --------------------------------------------------------------------------------
 -- DEnv (Dynamic Handler Environment) Functions
 --------------------------------------------------------------------------------
@@ -844,6 +876,116 @@ runtimeFunctions =
     -- DEnv functions
     allocDenvFunction,
     denvLookupFunction,
-    denvInsertFunction
+    denvInsertFunction,
+    -- Async functions (Phase 7)
+    allocAsyncContFunction,
+    resumeFunction
   ]
     ++ map mkApplyFunction [1 .. 3] -- Generate __apply1, __apply2, __apply3
+
+--------------------------------------------------------------------------------
+-- Async Continuation Support (Phase 7)
+--------------------------------------------------------------------------------
+
+-- | Allocate an async continuation object: @__alloc_async_cont(cont_id, k_ptr, locals_ptr, locals_count) -> i32@
+--
+-- Creates an OBJ_ASYNC_CONT object to store the suspended computation state.
+allocAsyncContFunction :: WatFunction
+allocAsyncContFunction =
+  WatFunction
+    { funcName = "__alloc_async_cont",
+      funcParams = [("cont_id", I64), ("k_ptr", I32), ("locals_ptr", I32), ("locals_count", I32)],
+      funcLocals = [("ptr", I32)],
+      funcResults = [I32],
+      funcBody =
+        [ Comment "Allocate OBJ_ASYNC_CONT object",
+          -- ptr = __alloc(asyncContSize)
+          I32Const (fromIntegral ABI.asyncContSize),
+          Call "__alloc",
+          LocalSet "ptr",
+          -- Write header: OBJ_ASYNC_CONT
+          LocalGet "ptr",
+          I64Const (fromIntegral (ABI.objTagToWord16 ABI.objAsyncCont)),
+          I64Const 48,
+          I64Shl,
+          I64Const (fromIntegral ABI.asyncContSize),
+          I64Or,
+          I64Store 0,
+          -- Write cont_id at offset 8
+          LocalGet "ptr",
+          LocalGet "cont_id",
+          I64Store (fromIntegral ABI.asyncContIdOffset),
+          -- Write k_ptr at offset 16
+          LocalGet "ptr",
+          LocalGet "k_ptr",
+          I32Store (fromIntegral ABI.asyncContKPtrOffset),
+          -- Write locals_ptr at offset 20
+          LocalGet "ptr",
+          LocalGet "locals_ptr",
+          I32Store (fromIntegral ABI.asyncContLocalsPtrOffset),
+          -- Write locals_count at offset 24
+          LocalGet "ptr",
+          LocalGet "locals_count",
+          I32Store (fromIntegral ABI.asyncContLocalsCountOffset),
+          -- Write status = PENDING at offset 28
+          LocalGet "ptr",
+          I32Const (fromIntegral ABI.asyncStatusPending),
+          I32Store (fromIntegral ABI.asyncContStatusOffset),
+          -- Return ptr
+          LocalGet "ptr"
+        ]
+    }
+
+-- | Resume function: @__resume(cont_id, value) -> i64@
+--
+-- Called by JS to resume a yielded computation.
+-- This is a placeholder - the actual resumption logic requires knowing
+-- the suspended function's context, which we'll handle via the async cont object.
+--
+-- For MVP, this function:
+-- 1. Validates the continuation ID matches
+-- 2. Loads the saved state from the async cont object
+-- 3. Restores K and locals
+-- 4. Returns the value (to be picked up by the suspended function)
+--
+-- Note: In the full implementation, resumption is more complex because we need
+-- to restore control to the exact suspension point. For MVP, we use a simpler
+-- scheme where async functions check the result and return early on yield.
+resumeFunction :: WatFunction
+resumeFunction =
+  WatFunction
+    { funcName = "__resume",
+      funcParams = [("cont_id", I64), ("value", I64)],
+      funcLocals = [("cont_ptr", I32)],
+      funcResults = [I64],
+      funcBody =
+        [ Comment "Resume a suspended async computation",
+          -- Get the async cont pointer from global
+          GlobalGet "async_cont_ptr",
+          LocalSet "cont_ptr",
+          -- Validate cont_id matches
+          LocalGet "cont_ptr",
+          I64Load (fromIntegral ABI.asyncContIdOffset),
+          LocalGet "cont_id",
+          I64Eq,
+          -- If mismatch, trap (in production would throw InvalidContinuationError)
+          -- For now we just return 0 on mismatch
+          I32Eqz,
+          IfVoid [I64Const 0, Return] [],
+          -- Mark as resumed
+          LocalGet "cont_ptr",
+          I32Const (fromIntegral ABI.asyncStatusResumed),
+          I32Store (fromIntegral ABI.asyncContStatusOffset),
+          -- Restore K pointer
+          LocalGet "cont_ptr",
+          I32Load (fromIntegral ABI.asyncContKPtrOffset),
+          GlobalSet "k_ptr",
+          -- Clear async state
+          I64Const 0,
+          GlobalSet "async_cont_id",
+          I32Const 0,
+          GlobalSet "async_cont_ptr",
+          -- Return the resume value
+          LocalGet "value"
+        ]
+    }

@@ -77,6 +77,9 @@ export const OBJ_BYTES: ObjTag = 0x009;
 /** Unison sequence (list/array) */
 export const OBJ_SEQUENCE: ObjTag = 0x00a;
 
+/** Async continuation (for yield/resume) */
+export const OBJ_ASYNC_CONT: ObjTag = 0x00b;
+
 /** Map ObjTag values to human-readable names */
 export const OBJ_TAG_NAMES: Record<ObjTag, string> = {
   [OBJ_ENUM]: 'Enum',
@@ -89,6 +92,7 @@ export const OBJ_TAG_NAMES: Record<ObjTag, string> = {
   [OBJ_TEXT]: 'Text',
   [OBJ_BYTES]: 'Bytes',
   [OBJ_SEQUENCE]: 'Sequence',
+  [OBJ_ASYNC_CONT]: 'AsyncCont',
 };
 
 // =============================================================================
@@ -430,3 +434,41 @@ export function sequenceObjectSize(length: number): number {
 export function pushFrameSize(savedCount: number): number {
   return PUSH_SAVED_OFFSET + savedCount * TYPED_SLOT_SIZE;
 }
+
+// =============================================================================
+// Async Continuation Constants
+// =============================================================================
+
+/** Size of an async continuation object */
+export const ASYNC_CONT_SIZE = 32;
+
+/** Offset of continuation ID in async cont */
+export const ASYNC_CONT_ID_OFFSET = 8;
+
+/** Offset of saved K pointer in async cont */
+export const ASYNC_CONT_KPTR_OFFSET = 16;
+
+/** Offset of locals pointer in async cont */
+export const ASYNC_CONT_LOCALS_PTR_OFFSET = 20;
+
+/** Offset of locals count in async cont */
+export const ASYNC_CONT_LOCALS_COUNT_OFFSET = 24;
+
+/** Offset of status field in async cont */
+export const ASYNC_CONT_STATUS_OFFSET = 28;
+
+/** Status: pending (not yet resumed) */
+export const ASYNC_STATUS_PENDING = 0;
+
+/** Status: resumed (consumed) */
+export const ASYNC_STATUS_RESUMED = 1;
+
+/** Status: freed (cleaned up) */
+export const ASYNC_STATUS_FREED = 2;
+
+/**
+ * Magic sentinel value indicating async yield.
+ * When a function returns this value, it means it yielded to JS.
+ * Uses a value that cannot be a valid Nat/Int/pointer.
+ */
+export const YIELD_SENTINEL = 0xffff_ffff_ffff_fffen;

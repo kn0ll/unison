@@ -57,9 +57,10 @@ testObjTags =
       scope "text" $ expect (objTagToWord16 objText == 0x008),
       scope "bytes" $ expect (objTagToWord16 objBytes == 0x009),
       scope "sequence" $ expect (objTagToWord16 objSequence == 0x00A),
+      scope "async-cont" $ expect (objTagToWord16 objAsyncCont == 0x00B),
       scope "fromWord16-valid" $ expect (objTagFromWord16 0x005 == Just objPAp),
       scope "fromWord16-invalid-zero" $ expect (objTagFromWord16 0x000 == Nothing),
-      scope "fromWord16-invalid-high" $ expect (objTagFromWord16 0x00B == Nothing)
+      scope "fromWord16-invalid-high" $ expect (objTagFromWord16 0x00C == Nothing)
     ]
 
 -- -----------------------------------------------------------------------------

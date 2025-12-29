@@ -44,6 +44,7 @@ module Unison.Wasm.ABI
     objText,
     objBytes,
     objSequence,
+    objAsyncCont,
 
     -- * Frame Tag Constants (8-bit)
     FrameTag (..),
@@ -172,6 +173,18 @@ module Unison.Wasm.ABI
     -- * TypedSlot Offset Helper
     slotPayloadOffset,
 
+    -- * Async Continuation Constants
+    asyncContSize,
+    asyncContIdOffset,
+    asyncContKPtrOffset,
+    asyncContLocalsPtrOffset,
+    asyncContLocalsCountOffset,
+    asyncContStatusOffset,
+    asyncStatusPending,
+    asyncStatusResumed,
+    asyncStatusFreed,
+    yieldSentinel,
+
     -- * Alignment
     align8,
 
@@ -260,7 +273,7 @@ objTagToWord16 = unObjTag
 
 objTagFromWord16 :: Word16 -> Maybe ObjTag
 objTagFromWord16 w
-  | w >= 0x001 && w <= 0x00A = Just (ObjTag w)
+  | w >= 0x001 && w <= 0x00B = Just (ObjTag w)
   | otherwise = Nothing
 
 -- | Enum (nullary constructor)
@@ -302,6 +315,10 @@ objBytes = ObjTag 0x009
 -- | Immutable sequence
 objSequence :: ObjTag
 objSequence = ObjTag 0x00A
+
+-- | Async continuation (for yield/resume)
+objAsyncCont :: ObjTag
+objAsyncCont = ObjTag 0x00B
 
 -- -----------------------------------------------------------------------------
 -- Frame Tag Constants
@@ -746,6 +763,60 @@ denvBaseSize = 4
 -- | Calculate DEnv size for N entries
 denvSize :: Word32 -> Word32
 denvSize entryCount = align8 (denvBaseSize + entryCount * denvEntrySize)
+
+-- -----------------------------------------------------------------------------
+-- Async Continuation Constants
+-- -----------------------------------------------------------------------------
+-- OBJ_ASYNC_CONT represents a suspended async computation.
+-- Layout:
+--   bytes 0-7:   Header (ObjTag=0x00B, size=32)
+--   bytes 8-15:  cont_id (i64) - unique ID for JS reference
+--   bytes 16-19: k_ptr (i32) - saved K stack pointer
+--   bytes 20-23: locals_ptr (i32) - pointer to saved locals array
+--   bytes 24-27: locals_count (i32) - number of saved locals
+--   bytes 28-31: status (i32) - 0=pending, 1=resumed, 2=freed
+
+-- | Size of an async continuation object
+asyncContSize :: Word32
+asyncContSize = 32
+
+-- | Offset of continuation ID
+asyncContIdOffset :: Word32
+asyncContIdOffset = 8
+
+-- | Offset of saved K stack pointer
+asyncContKPtrOffset :: Word32
+asyncContKPtrOffset = 16
+
+-- | Offset of saved locals pointer
+asyncContLocalsPtrOffset :: Word32
+asyncContLocalsPtrOffset = 20
+
+-- | Offset of saved locals count
+asyncContLocalsCountOffset :: Word32
+asyncContLocalsCountOffset = 24
+
+-- | Offset of status field
+asyncContStatusOffset :: Word32
+asyncContStatusOffset = 28
+
+-- | Status: pending (not yet resumed)
+asyncStatusPending :: Word32
+asyncStatusPending = 0
+
+-- | Status: resumed (consumed)
+asyncStatusResumed :: Word32
+asyncStatusResumed = 1
+
+-- | Status: freed (cleaned up)
+asyncStatusFreed :: Word32
+asyncStatusFreed = 2
+
+-- | Magic sentinel value indicating async yield
+-- When a function returns this value, it means it yielded to JS.
+-- Uses a value that cannot be a valid Nat/Int/pointer.
+yieldSentinel :: Word64
+yieldSentinel = 0xFFFF_FFFF_FFFF_FFFE
 
 -- -----------------------------------------------------------------------------
 -- TypedSlot Helper

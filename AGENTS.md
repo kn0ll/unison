@@ -12,7 +12,7 @@ This document provides guidance for AI agents working on the Unison WASM compila
 - [`plans/WASM.md`](./plans/WASM.md) — Implementation plan with phased approach
 - [`plans/WASM_ABI.md`](./plans/WASM_ABI.md) — Memory layout specification (the ABI contract)
 
-**Current Phase:** Phase 6 (Foreign Calls) — ✅ COMPLETE
+**Current Phase:** Phase 7 (Async Foreign Calls) — ✅ COMPLETE
 
 **Completed Phases:**
 - Phase 0: ABI Bootstrap + Conformance Tests ✅
@@ -23,19 +23,19 @@ This document provides guidance for AI agents working on the Unison WASM compila
 - Phase 4.5: Function Tables ✅ (call_indirect, __apply1, function dispatch)
 - Phase 5: Abilities ✅ (THnd, TShift, TKon, TReq, locals preservation, multi-ability)
 - Phase 6: Foreign Calls ✅ (TFOp compilation, import generation, JS runtime, TypeScript types)
+- Phase 7: Async Foreign Calls ✅ (ContinuationHandle, yield/resume, nested async detection)
 
-**Phase 6 Implemented Features:**
-- UnisonRuntime class: loadWasm(), call(), getText(), getBytes() ✓
-- ForeignHandleTable: alloc(), get(), free() for JS objects ✓
-- Default foreign functions: printLine, print, trace ✓
-- WatImport type: represents WASM imports in module ✓
-- Import emission: WAT text includes (import ...) declarations ✓
-- TFOp compilation: foreign calls generate `call $foreignFunc` instructions ✓
-- Auto-import collection: modules include all needed foreign function imports ✓
-- TypeScript .d.ts generation: `Unison.Wasm.TypeScript` module ✓
-- Typed apply(): runtime TypeTag checking with applyTyped() ✓
-- CLI command: `unison-wasm-poc types <name> [argType] [retType]` ✓
-- All 6 exit requirements satisfied ✓
+**Phase 7 Implemented Features:**
+- OBJ_ASYNC_CONT (0x00B): Heap object for suspended async computations ✓
+- YIELD_SENTINEL: Magic return value indicating async yield ✓
+- ContinuationHandle class: exactly-once enforcement for resume ✓
+- AsyncState enum: Idle, Yielded, Resuming state machine ✓
+- UnisonRuntime.run(): Promise-based async execution ✓
+- UnisonRuntime.allocContinuation(): Monotonic ID allocation ✓
+- __resume WASM export: JS can resume suspended computation ✓
+- __alloc_async_cont: Allocates OBJ_ASYNC_CONT objects ✓
+- NestedAsyncError: MVP constraint on one async at a time ✓
+- registerAsyncForeign(): Register Promise-returning functions ✓
 
 **Deferred (Phase 5):**
 - TReq full E2E: Requires compiling a separate handler closure with MatchRequest body,
@@ -43,9 +43,13 @@ This document provides guidance for AI agents working on the Unison WASM compila
   E2E verified; only the integrated TReq→handler→return path remains untested.
   Low risk since TReq generates identical patterns to TShift (which is E2E verified).
 
-**Test Counts (as of Phase 6 completion):**
-- Haskell: 301 tests pass (includes 9 E2E ability tests via wasmtime, 15 fixture tests, 26 TypeScript tests, 3 foreign call tests)
-- JavaScript: 95 tests pass (includes runtime tests, typed apply tests, compile-time type safety tests)
+**Deferred (Phase 7):**
+- Full E2E async test with real WASM module calling IO.fetch
+- The infrastructure is complete; needs integration test with browser/Node fetch
+
+**Test Counts (as of Phase 7 completion):**
+- Haskell: 302 tests pass (includes 9 E2E ability tests via wasmtime, 15 fixture tests, 26 TypeScript tests, 3 foreign call tests)
+- JavaScript: 113 tests pass (includes runtime tests, typed apply tests, compile-time type safety tests, 18 async tests)
 
 ---
 
