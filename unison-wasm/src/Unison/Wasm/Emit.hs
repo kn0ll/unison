@@ -13,6 +13,8 @@ module Unison.Wasm.Emit
     WatValType (..),
     WatGlobal (..),
     WatFuncType (..),
+    WatImport (..),
+    WatImportKind (..),
 
     -- * Emission
     emitModule,
@@ -90,6 +92,10 @@ data WatInstr
     I32WrapI64
   | -- | i64 extend i32 unsigned: @i64.extend_i32_u@
     I64ExtendI32U
+  | -- | Reinterpret f64 bits as i64: @i64.reinterpret_f64@
+    I64ReinterpretF64
+  | -- | Reinterpret i64 bits as f64: @f64.reinterpret_i64@
+    F64ReinterpretI64
 
   -- Memory operations
   | -- | Load i32 from memory: @i32.load offset=n@
@@ -228,6 +234,23 @@ data WatFunction = WatFunction
   }
   deriving (Eq, Show)
 
+-- | A WASM import declaration
+data WatImport = WatImport
+  { -- | Module name (e.g., "unison", "env")
+    importModule :: String,
+    -- | Import name within the module
+    importName :: String,
+    -- | What kind of import
+    importKind :: WatImportKind
+  }
+  deriving (Eq, Show)
+
+-- | The kind of a WASM import
+data WatImportKind
+  = -- | Function import with local name and type
+    ImportFunc String [WatValType] [WatValType]
+  deriving (Eq, Show)
+
 -- | A WASM module
 data WatModule = WatModule
   { -- | Memory size in pages (64KB each), Nothing = no memory
@@ -243,7 +266,9 @@ data WatModule = WatModule
     -- | Function types for call_indirect
     moduleFuncTypes :: [WatFuncType],
     -- | Function table entries (function names to include in table)
-    moduleTableFuncs :: [String]
+    moduleTableFuncs :: [String],
+    -- | Imports from host (Phase 6: foreign calls)
+    moduleImports :: [WatImport]
   }
   deriving (Eq, Show)
 
@@ -276,6 +301,8 @@ emitInstr I32LtU = "i32.lt_u"
 emitInstr I32GeU = "i32.ge_u"
 emitInstr I32WrapI64 = "i32.wrap_i64"
 emitInstr I64ExtendI32U = "i64.extend_i32_u"
+emitInstr I64ReinterpretF64 = "i64.reinterpret_f64"
+emitInstr F64ReinterpretI64 = "f64.reinterpret_i64"
 
 -- Memory operations
 emitInstr (I32Load offset) = "i32.load offset=" ++ show offset
@@ -409,6 +436,7 @@ emitModule m =
   unlines $
     ["(module"]
       ++ typeDecls
+      ++ importDecls
       ++ memoryDecl
       ++ tableDecl
       ++ map emitGlobal (moduleGlobals m)
@@ -429,6 +457,21 @@ emitModule m =
                       then ""
                       else " (result " ++ unwords (map emitValType (funcTypeResults ft)) ++ ")"
       in "  (type $" ++ funcTypeName ft ++ " (func" ++ params ++ results ++ "))"
+
+    -- Import declarations (Phase 6: foreign calls)
+    importDecls = map emitImport (moduleImports m)
+
+    emitImport imp =
+      let kindStr = case importKind imp of
+            ImportFunc localName params results ->
+              let paramsStr = if null params
+                                then ""
+                                else " (param " ++ unwords (map emitValType params) ++ ")"
+                  resultsStr = if null results
+                                 then ""
+                                 else " (result " ++ unwords (map emitValType results) ++ ")"
+              in "(func $" ++ localName ++ paramsStr ++ resultsStr ++ ")"
+      in "  (import \"" ++ importModule imp ++ "\" \"" ++ importName imp ++ "\" " ++ kindStr ++ ")"
 
     memoryDecl = case moduleMemory m of
       Nothing -> []

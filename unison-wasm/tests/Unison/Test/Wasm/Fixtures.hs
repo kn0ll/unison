@@ -5,6 +5,7 @@ module Unison.Test.Wasm.Fixtures where
 import Data.Functor.Identity (Identity, runIdentity)
 import Data.List (intercalate, isSuffixOf)
 import Data.Word (Word64)
+import Unsafe.Coerce (unsafeCoerce)
 import EasyTest
 import System.Directory (listDirectory, doesDirectoryExist)
 import System.Environment (lookupEnv)
@@ -118,14 +119,18 @@ runNative term = do
 
 -- | Extract a numeric value from a Term.
 --
--- Supports: Nat, Int, Float (truncated to i64)
+-- Supports: Nat, Int, Float (reinterpreted as i64 bits)
 -- Does NOT support: Text, Data, Lists, etc.
 extractNumeric :: Term.Term Symbol () -> Either String Word64
 extractNumeric tm = case ABT.out tm of
   ABT.Tm (Term.Nat n) -> Right n
   ABT.Tm (Term.Int n) -> Right (fromIntegral n)
-  ABT.Tm (Term.Float f) -> Right (round f)  -- Truncate float to int for comparison
+  ABT.Tm (Term.Float f) -> Right (floatToWord64 f)  -- Reinterpret float bits as i64
   _ -> Left $ "Result is not numeric (Nat/Int/Float): " ++ take 100 (show tm)
+
+-- | Reinterpret a Double's bits as Word64 (same as i64.reinterpret_f64 in WASM)
+floatToWord64 :: Double -> Word64
+floatToWord64 = unsafeCoerce
 
 --------------------------------------------------------------------------------
 -- WASM Compilation and Execution

@@ -13,6 +13,7 @@ import Unison.Test.Wasm.Compile qualified as Compile
 import Unison.Test.Wasm.Emit qualified as Emit
 import Unison.Test.Wasm.Fixtures qualified as Fixtures
 import Unison.Test.Wasm.Integration qualified as Integration
+import Unison.Test.Wasm.TypeScript qualified as TypeScript
 
 test :: Test ()
 test =
@@ -22,7 +23,8 @@ test =
       Compile.test,
       Emit.test,
       Fixtures.test,
-      Integration.test
+      Integration.test,
+      TypeScript.test
     ]
 
 main :: IO ()

@@ -1,0 +1,8 @@
+-- Partial application: return a partially applied function
+-- Run in UCM: evaluates to 15
+
+let
+  add x y = ##Nat.+ x y
+  add5 = add 5
+  add5 10
+

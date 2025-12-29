@@ -1,0 +1,6 @@
+-- Nested arithmetic expressions
+-- Run in UCM: evaluates to 100
+
+let
+  x = ##Nat.* 10 10
+  x

@@ -1,0 +1,7 @@
+-- Float arithmetic: addition
+-- Run in UCM: evaluates to 6.0
+-- WASM returns IEEE-754 bits reinterpreted as i64
+
+##Float.+ 2.5 3.5
+
+

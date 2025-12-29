@@ -1,0 +1,10 @@
+-- Recursive Fibonacci (multiple recursive calls)
+-- Run in UCM: evaluates to 55
+
+let
+fib n = match n with
+  0 -> 0
+  1 -> 1
+  _ -> ##Nat.+ (fib (##Nat.sub n 1)) (fib (##Nat.sub n 2))
+fib 10
+

@@ -1,0 +1,7 @@
+-- Function defined via let, then called
+-- Run in UCM: evaluates to 15
+
+let
+add x y = ##Nat.+ x y
+add 7 8
+

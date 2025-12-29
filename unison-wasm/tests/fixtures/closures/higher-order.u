@@ -1,0 +1,12 @@
+-- Higher-order function: function as argument
+-- Run in UCM: evaluates to 25
+
+let
+  apply f x = f x
+  double n = ##Nat.* n 2
+  addFive n = ##Nat.+ n 5
+  
+  -- apply double to 10 = 20
+  -- then apply addFive to result = 25
+  apply addFive (apply double 10)
+

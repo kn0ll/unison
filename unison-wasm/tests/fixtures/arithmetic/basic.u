@@ -1,0 +1,8 @@
+-- Basic arithmetic with let bindings
+-- Run in UCM: evaluates to 42
+
+let
+x = 10
+y = 32
+##Nat.+ x y
+

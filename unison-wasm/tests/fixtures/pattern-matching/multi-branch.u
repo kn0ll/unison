@@ -1,0 +1,11 @@
+-- Pattern matching with multiple branches
+-- Run in UCM: evaluates to 200
+
+let
+f x = match x with
+  1 -> 100
+  2 -> 200
+  3 -> 300
+  _ -> 999
+f 2
+

@@ -1,0 +1,12 @@
+-- Boolean pattern matching with comparison
+-- Run in UCM: evaluates to 100 (since 5 < 10 is true)
+
+let
+x = 5
+y = 10
+result = ##Nat.< x y
+match result with
+  true -> 100
+  false -> 200
+
+

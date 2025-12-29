@@ -22,6 +22,7 @@ library
       Unison.Wasm.Compile.Primitives
       Unison.Wasm.Compile.Runtime
       Unison.Wasm.Emit
+      Unison.Wasm.TypeScript
   hs-source-dirs:
       src
   default-extensions:
@@ -120,6 +121,7 @@ test-suite wasm-tests
       Unison.Test.Wasm.Emit
       Unison.Test.Wasm.Fixtures
       Unison.Test.Wasm.Integration
+      Unison.Test.Wasm.TypeScript
   hs-source-dirs:
       tests
   default-extensions:

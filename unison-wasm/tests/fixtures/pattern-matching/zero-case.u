@@ -1,0 +1,9 @@
+-- Pattern matching: specific case for 0
+-- Run in UCM: evaluates to 1
+
+let
+  isZero n = match n with
+    0 -> 1
+    _ -> 0
+  isZero 0
+

@@ -132,6 +132,14 @@ testArithmetic =
             expect ("i64.sub" `isInfixOf` wat)
     ]
 
+--------------------------------------------------------------------------------
+-- Foreign Call Tests (Phase 6)
+--------------------------------------------------------------------------------
+
+-- Note: Foreign call tests are in Abilities.hs since they require manually
+-- constructed ANormal IR (the parser doesn't resolve foreign func references
+-- in the unit test context without the full codebase environment).
+
 -- NOTE: These unit tests cover IR generation.
 -- For comprehensive end-to-end tests including pattern matching, recursion,
 -- closures, and sum types, see Integration.hs which runs the generated WAT.

@@ -1,0 +1,10 @@
+-- Comparison operations used in recursion
+-- Run in UCM: evaluates to 10 (countdown from 10)
+-- Tests Nat.< comparison in a practical context
+
+let
+countdown n acc = match n with
+  0 -> acc
+  _ -> countdown (##Nat.sub n 1) (##Nat.+ acc 1)
+countdown 10 0
+

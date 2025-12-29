@@ -32,10 +32,16 @@ module Unison.Wasm.Compile
     bindVars,
     setBaseLocalCount,
     getSaveableLocalCount,
+
+    -- * Foreign Calls (Phase 6)
+    foreignFuncToImportName,
+    collectForeignCalls,
+    foreignFuncsToImports,
   )
 where
 
 import Data.ByteString qualified as BS
+import Data.List (groupBy, sort)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
@@ -55,6 +61,7 @@ import Unison.Runtime.ANF
     SuperNormal (..),
     pattern TApp,
     pattern TBLit,
+    pattern TFOp,
     pattern THnd,
     pattern TKon,
     pattern TLets,
@@ -66,6 +73,7 @@ import Unison.Runtime.ANF
     pattern TVar,
   )
 import Unison.Runtime.ANF.POp (POp (..))
+import Unison.Runtime.Foreign.Function.Type (ForeignFunc (..), foreignFuncBuiltinName)
 import Unison.Runtime.TypeTags (CTag, rawTag)
 import Unison.Util.EnumContainers qualified as EC
 import Unison.Var (Var)
@@ -73,7 +81,7 @@ import Unison.Var qualified as Var
 import Unison.Wasm.ABI qualified as ABI
 import Unison.Wasm.Compile.Primitives qualified as P
 import Unison.Wasm.Compile.Runtime qualified as Runtime
-import Unison.Wasm.Emit (WatFunction (..), WatInstr (..), WatModule (..), WatValType (..))
+import Unison.Wasm.Emit (WatFunction (..), WatImport (..), WatImportKind (..), WatInstr (..), WatModule (..), WatValType (..))
 
 -- | Compilation errors
 data CompileError
@@ -223,7 +231,8 @@ compileGroup (Rec localDefs entry) exportName = do
         moduleExports = [exportName],
         moduleMemoryExport = Just "memory",
         moduleFuncTypes = Runtime.runtimeFuncTypes,
-        moduleTableFuncs = tableFuncs
+        moduleTableFuncs = tableFuncs,
+        moduleImports = []  -- No foreign calls in this mode
       }
 
 -- | Compile a SuperGroup along with its lambda-lifted combinators
@@ -269,6 +278,10 @@ compileGroupWithLifted (Rec localDefs entry) liftedGroups exportName = do
       userFuncs = liftedFuncs ++ localFuncs ++ [entryFunc]
       tableFuncs = map funcName userFuncs
 
+  -- Collect foreign calls from all SuperGroups
+  let allForeignCalls = collectForeignCallsFromGroups (Rec localDefs entry) liftedGroups
+      imports = foreignFuncsToImports allForeignCalls
+
   pure
     WatModule
       { moduleMemory = Just 1, -- 1 page (64KB) for heap
@@ -277,7 +290,8 @@ compileGroupWithLifted (Rec localDefs entry) liftedGroups exportName = do
         moduleExports = [exportName],
         moduleMemoryExport = Just "memory",
         moduleFuncTypes = Runtime.runtimeFuncTypes,
-        moduleTableFuncs = tableFuncs
+        moduleTableFuncs = tableFuncs,
+        moduleImports = imports
       }
 
 -- | Get the arity of a SuperGroup (from its entry point)
@@ -366,6 +380,7 @@ compileSuperNormalWithRefCtx funcNames funcArities refNames refArities refTableI
         , ("__k_start", I32)        -- TShift: K chain start
         , ("__k_walk", I32)         -- TShift: K walk pointer
         , ("__mark_ptr", I32)       -- TShift: Found Mark frame
+        , ("__float_temp", I64)     -- Float operations temp
         , ("__frame_tag", I32)      -- TShift: Frame tag
         , ("__captured_ptr", I32)   -- TShift: Captured object
         , ("__req_ptr", I32)        -- TReq: Request object pointer
@@ -430,6 +445,7 @@ compileSuperNormalWithCtx funcNames _currentFunc (Lambda mems body) name = do
         , ("__k_start", I32)        -- TShift: K chain start
         , ("__k_walk", I32)         -- TShift: K walk pointer
         , ("__mark_ptr", I32)       -- TShift: Found Mark frame
+        , ("__float_temp", I64)     -- Float operations temp
         , ("__frame_tag", I32)      -- TShift: Frame tag
         , ("__captured_ptr", I32)   -- TShift: Captured object
         , ("__req_ptr", I32)        -- TReq: Request object pointer
@@ -557,7 +573,7 @@ compileANormal ctx (TApp (FComb ref) args) = do
     Reference.Builtin name -> do
       -- Try to map builtin to primitive op
       case builtinToPrimOp name numArgs of
-        Just opInstr -> pure $ argInstrs ++ [opInstr]
+        Just opInstrs -> pure $ argInstrs ++ opInstrs
         Nothing ->
           -- Unknown builtin - fall back to function call if we have a name
           if null (ctxCurrentFunc ctx)
@@ -820,21 +836,21 @@ compileANormal ctx (TApp (FReq abilityRef tag) args) = do
       -- The handler is a closure that expects the request value.
       -- For MVP, the handler should use MatchRequest to dispatch.
       -- We call the handler via call_indirect with the request as argument.
-      
+
       -- Load handler's function index from PAp header
       , LocalGet "__handler_ptr"
       , I32Load (fromIntegral ABI.pApFuncRefOffset)  -- Get func table index from PAp
       , LocalSet "__handler_func_idx"
-      
+
       -- Push the request as argument (i64)
       , LocalGet "__req_ptr"
       , I64ExtendI32U
-      
+
       -- Push the captured continuation as second argument (i64)
       -- Handlers need access to the continuation to resume
       , LocalGet "__captured_ptr"
       , I64ExtendI32U
-      
+
       -- Call handler via call_indirect (arity 2: request, continuation)
       -- Stack has: [request, continuation], then we push index
       , LocalGet "__handler_func_idx"
@@ -1278,6 +1294,14 @@ compileANormal ctx (TKon contVar args) = do
           ]
           []
       ]
+
+-- Foreign function call: calls an imported JS function
+compileANormal ctx (TFOp foreignFunc args) = do
+  -- Compile arguments (push onto stack as i64)
+  argInstrs <- concat <$> mapM (compileANormal ctx . TVar) args
+  -- Call the imported function using its sanitized name
+  let funcName = foreignFuncToImportName foreignFunc
+  pure $ argInstrs ++ [Call funcName]
 
 -- Fallback for unsupported constructs
 compileANormal _ctx _term = do
@@ -1835,10 +1859,11 @@ compileApplyPAp papLocal numNewArgs argInstrs =
 --------------------------------------------------------------------------------
 
 -- | Compile a literal to WASM instructions
+-- Note: All values are stored as i64, so floats are reinterpreted to i64.
 compileLit :: Lit Reference -> CompileResult [WatInstr]
 compileLit (N n) = pure [I64Const n]
 compileLit (I n) = pure [I64Const (fromIntegral n)]
-compileLit (F f) = pure [F64Const f]
+compileLit (F f) = pure [F64Const f, I64ReinterpretF64]  -- Store as i64
 compileLit (C c) = pure [I64Const (fromIntegral (fromEnum c))]  -- Unicode codepoint as i64
 compileLit (T _t) = Left $ UnsupportedConstruct "Text literals not yet supported"
 compileLit (LM _) = Left $ UnsupportedConstruct "Term links not yet supported"
@@ -1891,36 +1916,165 @@ compilePrimOp op _n = Left $ UnsupportedPrimOp op
 -- | Map builtin reference names to WASM instructions
 -- This handles the case where parsed Unison code calls builtins via FComb
 -- rather than using TPrm directly.
-builtinToPrimOp :: Text -> Int -> Maybe WatInstr
+--
+-- Note: Comparison ops return i32 in WASM, so we extend to i64.
+-- Float ops produce f64, so we reinterpret to i64 for the return value.
+builtinToPrimOp :: Text -> Int -> Maybe [WatInstr]
 -- Nat operations (the ## prefix is stripped by the parser)
-builtinToPrimOp "Nat.+" 2 = Just I64Add
-builtinToPrimOp "Nat.sub" 2 = Just I64Sub
-builtinToPrimOp "Nat.*" 2 = Just I64Mul
-builtinToPrimOp "Nat./" 2 = Just I64DivU
-builtinToPrimOp "Nat.mod" 2 = Just I64RemU
-builtinToPrimOp "Nat.<=" 2 = Just I64LeU
-builtinToPrimOp "Nat.<" 2 = Just I64LtU
-builtinToPrimOp "Nat.==" 2 = Just I64Eq
-builtinToPrimOp "Universal.==" 2 = Just I64Eq
+builtinToPrimOp "Nat.+" 2 = Just [I64Add]
+builtinToPrimOp "Nat.sub" 2 = Just [I64Sub]
+builtinToPrimOp "Nat.*" 2 = Just [I64Mul]
+builtinToPrimOp "Nat./" 2 = Just [I64DivU]
+builtinToPrimOp "Nat.mod" 2 = Just [I64RemU]
+builtinToPrimOp "Nat.<=" 2 = Just [I64LeU, I64ExtendI32U]  -- Comparison returns i32, extend to i64
+builtinToPrimOp "Nat.<" 2 = Just [I64LtU, I64ExtendI32U]
+builtinToPrimOp "Nat.==" 2 = Just [I64Eq, I64ExtendI32U]
+builtinToPrimOp "Universal.==" 2 = Just [I64Eq, I64ExtendI32U]
 -- Int operations
-builtinToPrimOp "Int.+" 2 = Just I64Add
-builtinToPrimOp "Int.-" 2 = Just I64Sub
-builtinToPrimOp "Int.*" 2 = Just I64Mul
-builtinToPrimOp "Int./" 2 = Just I64DivS
-builtinToPrimOp "Int.mod" 2 = Just I64RemS
-builtinToPrimOp "Int.<=" 2 = Just I64LeS
-builtinToPrimOp "Int.<" 2 = Just I64LtS
-builtinToPrimOp "Int.==" 2 = Just I64Eq
+builtinToPrimOp "Int.+" 2 = Just [I64Add]
+builtinToPrimOp "Int.-" 2 = Just [I64Sub]
+builtinToPrimOp "Int.*" 2 = Just [I64Mul]
+builtinToPrimOp "Int./" 2 = Just [I64DivS]
+builtinToPrimOp "Int.mod" 2 = Just [I64RemS]
+builtinToPrimOp "Int.<=" 2 = Just [I64LeS, I64ExtendI32U]
+builtinToPrimOp "Int.<" 2 = Just [I64LtS, I64ExtendI32U]
+builtinToPrimOp "Int.==" 2 = Just [I64Eq, I64ExtendI32U]
 -- Float operations
-builtinToPrimOp "Float.+" 2 = Just F64Add
-builtinToPrimOp "Float.-" 2 = Just F64Sub
-builtinToPrimOp "Float.*" 2 = Just F64Mul
-builtinToPrimOp "Float./" 2 = Just F64Div
-builtinToPrimOp "Float.<=" 2 = Just F64Le
-builtinToPrimOp "Float.<" 2 = Just F64Lt
-builtinToPrimOp "Float.==" 2 = Just F64Eq
+-- Operands are stored as i64 (reinterpreted), so we convert back to f64, do the op, then convert result to i64
+-- Stack before: [i64_a, i64_b]
+-- We need: f64.reinterpret_i64 on each operand before the float op
+-- But we can't insert between operands with this approach, so we use a different strategy:
+-- The caller (compileANormal for FComb) handles pushing operands as i64.
+-- Float ops need to convert both operands. We handle this by emitting extra instructions.
+builtinToPrimOp "Float.+" 2 = Just $ floatBinOp F64Add
+builtinToPrimOp "Float.-" 2 = Just $ floatBinOp F64Sub
+builtinToPrimOp "Float.*" 2 = Just $ floatBinOp F64Mul
+builtinToPrimOp "Float./" 2 = Just $ floatBinOp F64Div
+builtinToPrimOp "Float.<=" 2 = Just $ floatCmpOp F64Le
+builtinToPrimOp "Float.<" 2 = Just $ floatCmpOp F64Lt
+builtinToPrimOp "Float.==" 2 = Just $ floatCmpOp F64Eq
 -- Unknown builtin
 builtinToPrimOp _ _ = Nothing
+
+-- | Generate instructions for a float binary operation.
+-- Stack before: [i64_a, i64_b]  (floats stored as reinterpreted i64)
+-- We need to convert both to f64, do the op, then convert result back to i64.
+-- Uses a temp local to handle the stack manipulation.
+floatBinOp :: WatInstr -> [WatInstr]
+floatBinOp op =
+  [ -- Stack: [i64_a, i64_b]
+    -- Save b to temp, convert a, reload b as f64
+    LocalSet "__float_temp"    -- Stack: [i64_a], temp = i64_b
+  , F64ReinterpretI64          -- Stack: [f64_a]
+  , LocalGet "__float_temp"    -- Stack: [f64_a, i64_b]
+  , F64ReinterpretI64          -- Stack: [f64_a, f64_b]
+  , op                         -- Stack: [f64_result]
+  , I64ReinterpretF64          -- Stack: [i64_result]
+  ]
+
+-- | Generate instructions for a float comparison operation.
+-- Same as floatBinOp but result is i32 (extended to i64).
+floatCmpOp :: WatInstr -> [WatInstr]
+floatCmpOp op =
+  [ LocalSet "__float_temp"
+  , F64ReinterpretI64
+  , LocalGet "__float_temp"
+  , F64ReinterpretI64
+  , op                         -- Stack: [i32_result]
+  , I64ExtendI32U              -- Stack: [i64_result]
+  ]
+
+--------------------------------------------------------------------------------
+-- Foreign Function Imports (Phase 6)
+--------------------------------------------------------------------------------
+
+-- | Convert a ForeignFunc to a WASM import function name.
+-- Dots and special chars are replaced with underscores to be WASM-compatible.
+foreignFuncToImportName :: ForeignFunc -> String
+foreignFuncToImportName ff =
+  Text.unpack $ Text.map sanitize (foreignFuncBuiltinName ff)
+  where
+    sanitize '.' = '_'
+    sanitize c = c
+
+-- | Collect all foreign function calls from an ANormal term.
+-- Returns a list of unique ForeignFuncs encountered.
+collectForeignCalls :: (Var v) => ANormal Reference v -> [ForeignFunc]
+collectForeignCalls = nub . go
+  where
+    go (TFOp ff _) = [ff]
+    go (TLets _ _ _ binding body) = go binding ++ go body
+    go (TMatch _ branches) = goBranches branches
+    go (THnd _ _ _ body) = go body
+    go (TShift _ _ body) = go body
+    go (TKon _ _) = []  -- TKon just calls a continuation, no nested terms
+    go (ABTN.Term _ (ABTN.Abs _ inner)) = go inner  -- Unwrap TAbs
+    go _ = []
+
+    goBranches (MatchIntegral cases def) =
+      concatMap go (map snd $ EC.mapToList cases) ++ maybe [] go def
+    goBranches (MatchNumeric _ cases def) =
+      concatMap go (map snd $ EC.mapToList cases) ++ maybe [] go def
+    goBranches (MatchData _ cases def) =
+      -- MatchData has ref, EnumMap CTag ([Mem], e), Maybe e
+      concatMap (\(_, (_, body)) -> go body) (EC.mapToList cases)
+        ++ maybe [] go def
+    goBranches (MatchEmpty) = []
+    goBranches (MatchRequest _ _) = []  -- Request handlers are complex, skip for now
+    goBranches (MatchText cases def) =
+      concatMap go (Map.elems cases) ++ maybe [] go def
+    goBranches (MatchSum cases) =
+      -- MatchSum has EnumMap Word64 ([Mem], e)
+      concatMap (\(_, (_, body)) -> go body) (EC.mapToList cases)
+
+    nub = map head . groupBy (==) . sort
+
+-- | Generate WatImport declarations for a list of foreign functions.
+-- Each foreign function becomes: (import "unison" "funcName" (func $funcName ...))
+foreignFuncsToImports :: [ForeignFunc] -> [WatImport]
+foreignFuncsToImports = map toImport
+  where
+    toImport ff =
+      let name = foreignFuncToImportName ff
+          -- For now, assume all foreign funcs take i64 args and return i64
+          -- TODO: Look up actual signature from ForeignFunc enum
+          (params, results) = foreignFuncSignature ff
+       in WatImport
+            { importModule = "unison",
+              importName = name,
+              importKind = ImportFunc name params results
+            }
+
+-- | Get the WASM type signature for a foreign function.
+-- For MVP, we use a simplified signature: all args as i64, returns i64.
+-- A more complete implementation would look up the actual Unison type signature.
+foreignFuncSignature :: ForeignFunc -> ([WatValType], [WatValType])
+foreignFuncSignature _ff = ([I64], [I64])  -- Simplified: 1 arg, 1 result
+
+-- | Collect foreign calls from a main SuperGroup and its lifted combinators.
+collectForeignCallsFromGroups ::
+  (Var v) =>
+  SuperGroup Reference v ->
+  [(Reference, SuperGroup Reference v)] ->
+  [ForeignFunc]
+collectForeignCallsFromGroups mainGroup liftedGroups =
+  let mainCalls = collectForeignCallsFromSuperGroup mainGroup
+      liftedCalls = concatMap (collectForeignCallsFromSuperGroup . snd) liftedGroups
+      allCalls = mainCalls ++ liftedCalls
+   in nub allCalls
+  where
+    nub = map head . groupBy (==) . sort
+
+-- | Collect foreign calls from a SuperGroup.
+collectForeignCallsFromSuperGroup :: (Var v) => SuperGroup Reference v -> [ForeignFunc]
+collectForeignCallsFromSuperGroup (Rec localDefs entry) =
+  let entryCalls = collectForeignCallsFromSuperNormal entry
+      localCalls = concatMap (collectForeignCallsFromSuperNormal . snd) localDefs
+   in entryCalls ++ localCalls
+
+-- | Collect foreign calls from a SuperNormal.
+collectForeignCallsFromSuperNormal :: (Var v) => SuperNormal Reference v -> [ForeignFunc]
+collectForeignCallsFromSuperNormal (Lambda _ body) = collectForeignCalls body
 
 --------------------------------------------------------------------------------
 -- Locals Save/Restore for Continuations

@@ -1,0 +1,9 @@
+-- Multiplication and subtraction
+-- Run in UCM: evaluates to 35
+
+let
+  x = 10
+  y = 3
+  product = ##Nat.* x y  -- 30
+  ##Nat.+ product 5      -- 35
+

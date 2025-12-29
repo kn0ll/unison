@@ -169,7 +169,8 @@ testModule =
                   moduleExports = [],
                   moduleMemoryExport = Nothing,
                   moduleFuncTypes = [],
-                  moduleTableFuncs = []
+                  moduleTableFuncs = [],
+                  moduleImports = []
                 }
         let wat = emitModule m
         expect ("(module" `isInfixOf` wat)
@@ -191,7 +192,8 @@ testModule =
                   moduleExports = ["myFunc"],
                   moduleMemoryExport = Nothing,
                   moduleFuncTypes = [],
-                  moduleTableFuncs = []
+                  moduleTableFuncs = [],
+                  moduleImports = []
                 }
         let wat = emitModule m
         expect ("export \"myFunc\"" `isInfixOf` wat)
@@ -207,7 +209,8 @@ testModule =
                   moduleExports = ["f1", "f2"],
                   moduleMemoryExport = Nothing,
                   moduleFuncTypes = [],
-                  moduleTableFuncs = []
+                  moduleTableFuncs = [],
+                  moduleImports = []
                 }
         let wat = emitModule m
         expect ("func $f1" `isInfixOf` wat)
@@ -223,7 +226,8 @@ testModule =
                   moduleExports = [],
                   moduleMemoryExport = Just "memory",
                   moduleFuncTypes = [],
-                  moduleTableFuncs = []
+                  moduleTableFuncs = [],
+                  moduleImports = []
                 }
         let wat = emitModule m
         expect ("(memory 1)" `isInfixOf` wat)
@@ -243,7 +247,8 @@ testModule =
                   moduleExports = [],
                   moduleMemoryExport = Nothing,
                   moduleFuncTypes = [],
-                  moduleTableFuncs = []
+                  moduleTableFuncs = [],
+                  moduleImports = []
                 }
         let wat = emitModule m
         expect ("global $heap_ptr" `isInfixOf` wat)
@@ -260,7 +265,8 @@ testModule =
                   moduleExports = ["f1"],
                   moduleMemoryExport = Nothing,
                   moduleFuncTypes = [],
-                  moduleTableFuncs = ["f1", "f2"]
+                  moduleTableFuncs = ["f1", "f2"],
+                  moduleImports = []
                 }
         let wat = emitModule m
         expect ("(table 2 funcref)" `isInfixOf` wat)
@@ -275,12 +281,34 @@ testModule =
                   moduleExports = [],
                   moduleMemoryExport = Nothing,
                   moduleFuncTypes = [ft],
-                  moduleTableFuncs = []
+                  moduleTableFuncs = [],
+                  moduleImports = []
                 }
         let wat = emitModule m
         expect ("(type $unary_i64 (func (param i64) (result i64)))" `isInfixOf` wat),
       scope "call_indirect" $ do
         -- Test that call_indirect emits correctly
         let instr = CallIndirect "unary_i64"
-        expectEqual (emitInstr instr) "call_indirect (type $unary_i64)"
+        expectEqual (emitInstr instr) "call_indirect (type $unary_i64)",
+      scope "with_imports" $ do
+        -- Test that imports are emitted correctly (Phase 6: foreign calls)
+        let imp = WatImport
+              { importModule = "unison",
+                importName = "printLine",
+                importKind = ImportFunc "IO_printLine" [I32] []
+              }
+        let m =
+              WatModule
+                { moduleMemory = Nothing,
+                  moduleGlobals = [],
+                  moduleFunctions = [],
+                  moduleExports = [],
+                  moduleMemoryExport = Nothing,
+                  moduleFuncTypes = [],
+                  moduleTableFuncs = [],
+                  moduleImports = [imp]
+                }
+        let wat = emitModule m
+        expect ("(import \"unison\" \"printLine\"" `isInfixOf` wat)
+        expect ("(func $IO_printLine (param i32))" `isInfixOf` wat)
     ]

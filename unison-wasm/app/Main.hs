@@ -4,6 +4,7 @@
 --
 -- Usage:
 --   unison-wasm-poc compile <name> <code> -- Compile Unison code to WAT
+--   unison-wasm-poc types <name>          -- Generate TypeScript definitions
 --   unison-wasm-poc debug <code>          -- Show parsed SuperGroup structure
 module Main where
 
@@ -27,6 +28,7 @@ import Unison.Term qualified as Unison.Term
 import Unison.Term (unannotate)
 import Unison.Wasm.Compile (compileGroupWithLifted)
 import Unison.Wasm.Emit (emitModule)
+import Unison.Wasm.TypeScript (generateDtsFromExports, TsType (..))
 
 -- | Parsing environment with builtin names
 parsingEnv :: Parser.ParsingEnv Identity
@@ -92,22 +94,52 @@ main = do
               hPutStrLn stderr $ "Compilation error: " ++ show compileErr
               exitFailure
             Right wasm -> putStr (emitModule wasm)
+    ["types", name] -> do
+      -- Generate TypeScript type definitions for a compiled module
+      -- Currently generates a template with common exports; real implementation
+      -- would extract types from the compiled module.
+      let dts = generateDtsFromExports name
+            [ (name, [TsBigInt], TsBigInt)  -- Default: assumes Nat -> Nat
+            ]
+      putStr dts
+    ["types", name, argType, retType] -> do
+      -- Generate TypeScript definitions with explicit types
+      -- types <name> <argType> <retType>
+      let argTs = parseTypeArg argType
+          retTs = parseTypeArg retType
+          dts = generateDtsFromExports name [(name, [argTs], retTs)]
+      putStr dts
     [] -> usage
     _ -> do
       hPutStrLn stderr $ "Unknown command: " ++ unwords args
       usage
       exitFailure
 
+-- | Parse a type argument string to TsType
+parseTypeArg :: String -> TsType
+parseTypeArg "Nat" = TsBigInt
+parseTypeArg "Int" = TsBigInt
+parseTypeArg "Float" = TsNumber
+parseTypeArg "Text" = TsString
+parseTypeArg "Boolean" = TsBoolean
+parseTypeArg "Unit" = TsVoid
+parseTypeArg name = TsNamed name
+
 usage :: IO ()
 usage = do
   hPutStrLn stderr "Usage: unison-wasm-poc <command>"
   hPutStrLn stderr ""
   hPutStrLn stderr "Commands:"
-  hPutStrLn stderr "  compile <name> <code>  Compile Unison code to WAT"
-  hPutStrLn stderr "  debug <code>           Show parsed SuperGroup structure"
+  hPutStrLn stderr "  compile <name> <code>           Compile Unison code to WAT"
+  hPutStrLn stderr "  types <name>                    Generate TypeScript .d.ts (default: Nat -> Nat)"
+  hPutStrLn stderr "  types <name> <arg> <ret>        Generate .d.ts with explicit types"
+  hPutStrLn stderr "  debug <code>                    Show parsed SuperGroup structure"
+  hPutStrLn stderr ""
+  hPutStrLn stderr "Supported types for 'types' command: Nat, Int, Float, Text, Boolean, Unit"
   hPutStrLn stderr ""
   hPutStrLn stderr "Examples:"
   hPutStrLn stderr "  unison-wasm-poc compile increment '##Nat.+ p0 1'"
-  hPutStrLn stderr "  unison-wasm-poc compile add '##Nat.+ p0 p1'"
+  hPutStrLn stderr "  unison-wasm-poc types factorial"
+  hPutStrLn stderr "  unison-wasm-poc types greet Text Text"
   hPutStrLn stderr "  unison-wasm-poc compile factorial \\"
   hPutStrLn stderr "    'let go n = match n with 0 -> 1; _ -> ##Nat.* n (go (##Nat.sub n 1)); go 5'"

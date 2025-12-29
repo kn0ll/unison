@@ -1,0 +1,9 @@
+-- Recursive factorial function
+-- Run in UCM: evaluates to 120
+
+let
+go n = match n with
+  0 -> 1
+  _ -> ##Nat.* n (go (##Nat.sub n 1))
+go 5
+

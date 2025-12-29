@@ -36,16 +36,18 @@ import Unison.Runtime.ANF
     pattern TPrm,
     pattern TCon,
     pattern TReq,
+    pattern TFOp,
     Direction (..),
     Lit (..),
     POp (..),
   )
+import Unison.Runtime.Foreign.Function.Type (ForeignFunc (..))
 import Unison.Runtime.TypeTags (CTag (..))
 import Unison.Util.EnumContainers qualified as EC
 import Unison.Symbol (Symbol)
 import Unison.Var qualified as Var
 import Unison.Wasm.Compile (compileGroupWithLifted, CompileError)
-import Unison.Wasm.Emit (WatModule (..), emitModule)
+import Unison.Wasm.Emit (WatModule (..), WatImport (..), emitModule)
 
 --------------------------------------------------------------------------------
 -- Test Infrastructure
@@ -158,7 +160,11 @@ test =
       testMatchRequestPure,
       testMatchRequestAbilityDispatch,
       testLocalsPreserved,
-      testTReqE2E
+      testTReqE2E,
+      -- Phase 6: Foreign call tests
+      testForeignCallImport,
+      testForeignCallWat,
+      testMultipleForeignCalls
     ]
 
 --------------------------------------------------------------------------------
@@ -761,4 +767,76 @@ testCaptureResume =
     -- TODO: Construct proper ANormal IR
     crash "Not implemented"
 -}
+
+--------------------------------------------------------------------------------
+-- Phase 6: Foreign Call Tests
+--------------------------------------------------------------------------------
+
+-- | Test that TFOp generates an import declaration
+testForeignCallImport :: Test ()
+testForeignCallImport =
+  scope "foreign_import" $ do
+    -- Construct: Text_toUtf8 x
+    -- This is a simple foreign call that should generate an import
+    let xVar = mkVar "x"
+        -- TFOp: call a foreign function with one argument
+        body = TFOp Text_toUtf8 [xVar]
+        -- Wrap in a lambda that takes x
+        sn = Lambda [BX] (ABTN.TAbs xVar body)
+        sg = Rec [] sn :: SuperGroup Reference Symbol
+
+    case compileToWatNamed "toUtf8" sg of
+      Left err -> crash $ "Compilation failed: " ++ show err
+      Right wasm -> do
+        -- Check that the import was generated
+        let imports = moduleImports wasm
+        expect (not (null imports))
+        -- The import should be for the "unison" namespace
+        case imports of
+          (imp : _) -> expect (importModule imp == "unison")
+          [] -> crash "Expected at least one import"
+
+-- | Test that foreign call generates correct WAT
+testForeignCallWat :: Test ()
+testForeignCallWat =
+  scope "foreign_wat" $ do
+    let xVar = mkVar "x"
+        body = TFOp Text_toUtf8 [xVar]
+        sn = Lambda [BX] (ABTN.TAbs xVar body)
+        sg = Rec [] sn :: SuperGroup Reference Symbol
+
+    case getWatNamed "toUtf8" sg of
+      Left err -> crash $ "Compilation failed: " ++ err
+      Right wat -> do
+        -- Check that the import declaration is present
+        expect ("(import \"unison\" \"Text_toUtf8\"" `isInfixOf` wat)
+        -- Check that the call instruction is present
+        expect ("call $Text_toUtf8" `isInfixOf` wat)
+
+-- | Test multiple foreign calls in one function
+testMultipleForeignCalls :: Test ()
+testMultipleForeignCalls =
+  scope "foreign_multiple" $ do
+    -- Construct: let a = Char_toText x in Text_reverse a
+    let xVar = mkVar "x"
+        aVar = mkVar "a"
+        -- First call: Char_toText (takes 1 arg)
+        innerCall = TFOp Char_toText [xVar]
+        -- Second call: Text_reverse
+        outerCall = TFOp Text_reverse [aVar]
+        -- Combine with let
+        body = TLets Direct [aVar] [BX] innerCall outerCall
+        sn = Lambda [UN] (ABTN.TAbs xVar body)
+        sg = Rec [] sn :: SuperGroup Reference Symbol
+
+    case compileToWatNamed "multi" sg of
+      Left err -> crash $ "Compilation failed: " ++ show err
+      Right wasm -> do
+        -- Should have 2 imports
+        let imports = moduleImports wasm
+        expect (length imports == 2)
+        -- Check WAT text has both calls
+        let wat = emitModule wasm
+        expect ("call $Char_toText" `isInfixOf` wat)
+        expect ("call $Text_reverse" `isInfixOf` wat)
 

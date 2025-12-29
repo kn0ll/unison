@@ -1,0 +1,9 @@
+-- Int arithmetic operations
+-- Run in UCM: evaluates to 42
+
+let
+a = +100
+b = +58
+##Int.- a b
+
+

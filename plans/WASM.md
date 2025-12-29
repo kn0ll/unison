@@ -1085,57 +1085,57 @@ $ node test-counter.js
 Counter.run result = 42
 ```
 
-We are nowhere near this checkpoint passing.
+✅ **Phase 5 is COMPLETE** — All tasks below are implemented and verified via E2E tests.
 
 #### Detailed Phase 5 Task Breakdown
 
-Based on studying `Machine.hs`, here's what's actually needed:
+Based on studying `Machine.hs`, here's what was implemented:
 
-**Task 5.A: Understand native ability flow (study only)**
-- [ ] Read `exec` handling of `Reset` instruction (installs handler)
-- [ ] Read `exec` handling of `Capture` instruction (captures continuation)
-- [ ] Read `splitCont` (walks K stack, creates Captured closure)
-- [ ] Read `jump` + `repush` (resumes captured continuation)
-- [ ] Read `RMatch` handling in `eval'` (dispatches ability requests)
+**Task 5.A: Understand native ability flow (study only)** ✅
+- [x] Read `exec` handling of `Reset` instruction (installs handler)
+- [x] Read `exec` handling of `Capture` instruction (captures continuation)
+- [x] Read `splitCont` (walks K stack, creates Captured closure)
+- [x] Read `jump` + `repush` (resumes captured continuation)
+- [x] Read `RMatch` handling in `eval'` (dispatches ability requests)
 
-**Task 5.B: DEnv representation**
-- [ ] Design WASM-compatible dynamic environment structure
-- [ ] Native uses `EnumMap Word64 Closure` - we need linear memory equivalent
-- [ ] Consider: array of (ability_ref, handler_ptr) pairs
-- [ ] Implement `denv_lookup(ability_ref) -> handler_ptr`
-- [ ] Implement `denv_push(ability_ref, handler_ptr, saved_denv)`
+**Task 5.B: DEnv representation** ✅
+- [x] Design WASM-compatible dynamic environment structure → `$denv_ptr` global
+- [x] Native uses `EnumMap Word64 Closure` - we use linear memory equivalent
+- [x] Consider: array of (ability_ref, handler_ptr) pairs → Mark frames store handler
+- [x] Implement `denv_lookup(ability_ref) -> handler_ptr` → handler stored in Mark
+- [x] Implement `denv_push(ability_ref, handler_ptr, saved_denv)` → THnd pushes Mark
 
-**Task 5.C: Proper continuation capture (TShift → Capture)**
-- [ ] Walk K stack looking for Mark with matching ability
-- [ ] Count stack slots to capture (sum of frame sizes)
-- [ ] Allocate Captured object with space for saved slots
-- [ ] Copy saved slots from each Push frame into Captured
-- [ ] Store pending_args from Mark frame
-- [ ] Pop K frames up to and including the matched Mark
-- [ ] Bind captured continuation to variable
+**Task 5.C: Proper continuation capture (TShift → Capture)** ✅
+- [x] Walk K stack looking for Mark with matching ability
+- [x] Count stack slots to capture (sum of frame sizes)
+- [x] Allocate Captured object with space for saved slots
+- [x] Copy saved slots from each Push frame into Captured
+- [x] Store pending_args from Mark frame
+- [x] Pop K frames up to and including the matched Mark
+- [x] Bind captured continuation to variable
 
-**Task 5.D: Proper continuation resume (TKon → Jump)**
-- [ ] Load Captured object fields
-- [ ] Call `repush` equivalent to restore K frames
-- [ ] Restore stack slots from Captured
-- [ ] Continue execution with provided arguments
+**Task 5.D: Proper continuation resume (TKon → Jump)** ✅
+- [x] Load Captured object fields
+- [x] Call `repush` equivalent to restore K frames
+- [x] Restore stack slots from Captured
+- [x] Continue execution with provided arguments
 
-**Task 5.E: Request handling (MatchRequest)**
-- [ ] Handle `MatchRequest` branch type in pattern matching
-- [ ] Extract ability tag and constructor tag from request
-- [ ] Dispatch to correct handler case
-- [ ] Resume continuation if handler calls `k`
+**Task 5.E: Request handling (MatchRequest)** ✅
+- [x] Handle `MatchRequest` branch type in pattern matching
+- [x] Extract ability tag and constructor tag from request
+- [x] Dispatch to correct handler case
+- [x] Resume continuation if handler calls `k` (via TKon)
 
-**Task 5.F: Handler installation (THnd → Reset)**
-- [ ] Push Mark frame with pending_args
-- [ ] Store handler in DEnv for ability reference
-- [ ] Save old DEnv in Mark frame for restoration
-- [ ] On normal completion, pop Mark and restore DEnv
+**Task 5.F: Handler installation (THnd → Reset)** ✅
+- [x] Push Mark frame with pending_args
+- [x] Store handler in DEnv for ability reference
+- [x] Save old DEnv in Mark frame for restoration
+- [x] On normal completion, pop Mark and restore DEnv
 
-**Task 5.G: Integration test**
-- [ ] Create standalone test that doesn't require UCM parsing
-- [ ] Manually construct SuperGroup for simple ability usage
-- [ ] Verify full ability loop: install handler → request → capture → resume
+**Task 5.G: Integration test** ✅
+- [x] Create standalone test that doesn't require UCM parsing → `Abilities.hs`
+- [x] Manually construct SuperGroup for simple ability usage → 9 E2E tests
+- [x] Verify full ability loop: install handler → request → capture → resume
 
 #### Prerequisites (from earlier phases)
 
@@ -1221,9 +1221,11 @@ counterExample =
 
 ---
 
-### Phase 6: Foreign Calls (JS Interop)
+### Phase 6: Foreign Calls (JS Interop) — 🚧 IN PROGRESS
 
 **Goal:** Call JavaScript functions from Unison WASM, with full TypeScript type safety.
+
+**Status:** Core implementation complete. All exit requirements satisfied.
 
 #### Phase 6 Contract
 
@@ -1237,13 +1239,16 @@ counterExample =
 | **MUST NOT** | Use `ContinuationHandle` |
 | **Deferred** | Async foreign calls (Phase 7) |
 
-**Tasks:**
-1. Map `ForeignFunc` subset to WASM imports
-2. Implement foreign handle table (JS side)
-3. Build JS runtime harness
-4. Generate `.d.ts` TypeScript definitions from Unison types
-5. Implement typed `apply()` with runtime TypeTag checking
-6. Verify TypeScript catches type mismatches at compile time
+**Completed Tasks:**
+1. ✅ Implement foreign handle table (JS side) - `ForeignHandleTable` class
+2. ✅ Build JS runtime harness - `UnisonRuntime` class with loadWasm, call, getText
+3. ✅ Add `WatImport` type and import emission to WAT output
+4. ✅ Generate `.d.ts` TypeScript definitions from Unison types - `Unison.Wasm.TypeScript` module
+5. ✅ Implement typed `apply()` with runtime TypeTag checking - `applyTyped()` method
+6. ✅ Verify TypeScript catches type mismatches at compile time - `typesafety.test.ts`
+7. ✅ Wire `TFOp` (foreign calls) in Compile.hs to emit `call $foreignFunc` instructions
+8. ✅ Collect foreign calls and auto-populate `moduleImports` in compiled modules
+9. ✅ Add Haskell tests for foreign call compilation (3 tests: import generation, WAT output, multiple calls)
 
 **TypeScript Generation:**
 ```typescript
@@ -1308,14 +1313,14 @@ apply(widget.render);            // ✗ TS Error: Expected 1 argument
 
 **Exit Requirements (for future phases):**
 
-| Requirement | Why | Used By |
-|-------------|-----|---------|
-| **JS Runtime class** with `loadWasm()`, `call()`, `getText()` | Encapsulates WASM instance management | Phase 7 async, Phase 8 UCM |
-| **Foreign handle table** (`Map<number, any>`) | Stores JS objects referenced by WASM | Phase 7 ContinuationHandle |
-| **Import namespace convention**: `(import "unison" "funcName" ...)` | Consistent import structure | Phase 8 UCM bundling |
-| **Export convention**: entry function + `apply1`..`applyN` | Standardized calling interface | Phase 7 resume, Phase 8 UCM |
-| **Memory inspector** API: `dumpHeap()`, `inspectValue(ptr)` | Debug visibility into WASM state | All future phases |
-| **Error types**: `UnisonRuntimeError`, `TypeMismatchError` | Structured error handling | Phase 7 async errors |
+| Requirement | Status | Why | Used By |
+|-------------|--------|-----|---------|
+| **JS Runtime class** with `loadWasm()`, `call()`, `getText()` | ✅ | Encapsulates WASM instance management | Phase 7 async, Phase 8 UCM |
+| **Foreign handle table** (`Map<number, any>`) | ✅ | Stores JS objects referenced by WASM | Phase 7 ContinuationHandle |
+| **Import namespace convention**: `(import "unison" "funcName" ...)` | ✅ | Consistent import structure | Phase 8 UCM bundling |
+| **Export convention**: entry function + `apply1`..`applyN` | ✅ | Standardized calling interface | Phase 7 resume, Phase 8 UCM |
+| **Memory inspector** API: `dumpHeap()`, `inspectValue(ptr)` | ✅ | Debug visibility into WASM state | All future phases |
+| **Error types**: `UnisonRuntimeError`, `TypeMismatchError` | ✅ | Structured error handling | Phase 7 async errors |
 
 **JS Runtime Structure (Phase 6 must establish):**
 ```typescript

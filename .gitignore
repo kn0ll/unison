@@ -9,6 +9,8 @@ unisonLocal.zip
 !unison-src/**/*.u
 # And integration tests
 !unison-cli-integration/integration-tests/IntegrationTests/**/*.u
+# And WASM tests
+!unison-wasm/tests/fixtures/**/*.u
 
 # Auto-generated
 interpreter-tests.md

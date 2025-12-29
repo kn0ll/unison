@@ -64,6 +64,26 @@ export class TypeTagMismatchError extends Error {
 }
 
 /**
+ * Thrown when runtime TypeTag validation fails in apply().
+ * This is a more detailed error that includes argument position.
+ */
+export class TypeTagError extends Error {
+  readonly argIndex: number;
+  readonly expectedTag: number;
+  readonly actualTag: number;
+
+  constructor(argIndex: number, expectedTag: number, actualTag: number, expectedName?: string, actualName?: string) {
+    const expName = expectedName || `0x${expectedTag.toString(16)}`;
+    const actName = actualName || `0x${actualTag.toString(16)}`;
+    super(`Argument ${argIndex}: expected ${expName}, got ${actName}`);
+    this.name = 'TypeTagError';
+    this.argIndex = argIndex;
+    this.expectedTag = expectedTag;
+    this.actualTag = actualTag;
+  }
+}
+
+/**
  * Thrown when apply() receives too many arguments.
  */
 export class ArityError extends Error {

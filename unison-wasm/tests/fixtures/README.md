@@ -15,11 +15,28 @@ If native says `120`, WASM must produce `120`.
 
 ```
 fixtures/
-├── recursion/       # Recursive functions (factorial, fibonacci)
-├── arithmetic/      # Basic math operations
-├── pattern-matching/# Match expressions with multiple branches
-└── closures/        # Let bindings and closures
+├── arithmetic/       # Nat/Int operations (+, -, *, /, mod)
+├── recursion/        # Recursive functions (factorial, fibonacci)
+├── pattern-matching/ # Match expressions with multiple branches
+└── closures/         # Let bindings, higher-order functions, partial application
 ```
+
+## Feature Coverage
+
+| Feature | Covered | Notes |
+|---------|---------|-------|
+| Nat arithmetic | ✅ | +, sub, *, /, mod |
+| Int arithmetic | ✅ | +, -, *, /, mod |
+| Float arithmetic | ✅ | +, -, *, / (reinterpreted as i64) |
+| Comparisons | ✅ | <, <=, == (returns Boolean as 0/1) |
+| Boolean matching | ✅ | match on true/false |
+| Pattern matching | ✅ | Multi-branch, zero-case |
+| Recursion | ✅ | Direct recursion |
+| Let bindings | ✅ | Simple and nested |
+| Higher-order functions | ✅ | Functions as arguments |
+| Partial application | ✅ | Creating closures |
+| **Abilities** | ⚠️ | Tested in `Abilities.hs` (parser limitation) |
+| **Foreign calls** | ⚠️ | Tested in `Abilities.hs` (needs JS runtime) |
 
 ## Adding a New Fixture
 
@@ -37,8 +54,13 @@ let factorial n = match n with
 factorial 5
 ```
 
-## Abilities
+## Known Limitations
 
-Ability tests (handle/shift/resume) cannot use `.u` fixtures because
-the parser doesn't support `handle` syntax. These are tested via
-manually constructed ANormal IR in `Abilities.hs`.
+1. **Abilities**: The parser doesn't support `handle` syntax, so ability tests
+   use manually constructed ANormal IR in `Abilities.hs`.
+
+2. **Foreign calls**: Require a JS runtime to execute, so they're tested via
+   unit tests in `Abilities.hs` that verify import generation.
+
+3. **Complex sum types (Optional, List, etc.)**: Require full data constructor
+   support. Basic Boolean (true/false) works.

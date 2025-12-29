@@ -1,0 +1,9 @@
+-- Division and modulo operations
+-- Run in UCM: evaluates to 7 (100 / 14 = 7)
+
+let
+a = 100
+b = 14
+##Nat./ a b
+
+
