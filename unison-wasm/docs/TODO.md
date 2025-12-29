@@ -24,7 +24,6 @@ The current implementation (v0.1.0) is a **proof of concept**. It demonstrates t
 |------|---------------|----------|
 | **Codebase-aware compilation** | CLI takes inline strings | Compile by looking up terms in codebase |
 | **Multi-function modules** | Each compile = 1 function | Compile term with all dependencies |
-| **UCM integration** | Standalone CLI only | `compile.wasm myFunc` command |
 | **Direct .u compilation** | Demo uses handwritten WAT | Compile `pricing.u` without fallback |
 | **Browser foreign handlers** | Only `IO.printNat` | Handlers for `IO_delay`, stdout, + DOM/Events abilities |
 
@@ -41,16 +40,11 @@ The current implementation (v0.1.0) is a **proof of concept**. It demonstrates t
    - Generate function table for indirect calls
    - Handle cross-function references
 
-3. **UCM command**
-   - Add `compile.wasm` to `HandleInput.hs`
-   - Output: `.wasm` file + `.d.ts` type definitions
-   - Options: `--output`, `--optimize`, `--debug`
-
-4. **Remove demo fallback**
+3. **Remove demo fallback**
    - Update `build-wasm.sh` to compile `pricing.u` directly
    - Delete handwritten WAT reference implementation
 
-5. **Browser foreign function handlers**
+4. **Browser foreign function handlers**
    - Provide browser-compatible implementations of Unison's existing foreign functions
    - Map existing abilities to browser APIs (not inventing new abilities)
 
@@ -286,10 +280,3 @@ The following items are not blocking the current implementation. They represent 
 | TReq full E2E test | All underlying components (capture, resume, dispatch) are E2E verified. TReq generates identical patterns to TShift (fully tested). Low risk. |
 | Async `fetch` E2E test | Infrastructure complete. `ContinuationHandle`, yield/resume, state machine all tested. Needs browser integration test. |
 
-### UCM Integration (Future)
-
-| Item | Notes |
-|------|-------|
-| `compile.wasm` UCM command | Add a command to compile Unison terms to WASM from within UCM |
-| Native Unison server demo | Replace Node.js Express server with native Unison HTTP server |
-| Codebase-aware compilation | Compile terms with full codebase context (dependencies, builtins) |
