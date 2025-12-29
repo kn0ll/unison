@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Unison WASM Demo: Price Calculator</title>
+  <style>
+    :root {
+      --bg: #1a1a2e;
+      --card: #16213e;
+      --accent: #e94560;
+      --text: #eee;
+      --muted: #888;
+      --success: #4ade80;
+      --warning: #fbbf24;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      background: var(--bg);
+      color: var(--text);
+      max-width: 700px;
+      margin: 0 auto;
+      padding: 2rem;
+      line-height: 1.6;
+    }
+
+    h1 {
+      color: var(--accent);
+      font-size: 1.5rem;
+      margin-bottom: 0.5rem;
+    }
+
+    h2 {
+      font-size: 1.1rem;
+      margin-bottom: 1rem;
+      color: var(--text);
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin-bottom: 2rem;
+    }
+
+    .card {
+      background: var(--card);
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .slider-container {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+
+    input[type="range"] {
+      flex: 1;
+      accent-color: var(--accent);
+      height: 8px;
+    }
+
+    .quantity-display {
+      font-size: 2rem;
+      font-weight: bold;
+      color: var(--accent);
+      min-width: 3ch;
+      text-align: right;
+    }
+
+    .price-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 0.5rem 0;
+    }
+
+    .price-row.total {
+      border-top: 1px solid var(--muted);
+      margin-top: 0.5rem;
+      padding-top: 1rem;
+      font-size: 1.2rem;
+      font-weight: bold;
+    }
+
+    .price-row .label { color: var(--muted); }
+    .price-row .value { color: var(--text); }
+    .price-row.discount .value { color: var(--success); }
+    .price-row.total .value { color: var(--accent); }
+
+    .wasm-badge {
+      font-size: 0.7rem;
+      background: var(--accent);
+      color: white;
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      margin-left: 0.5rem;
+      vertical-align: middle;
+    }
+
+    button {
+      background: var(--accent);
+      color: white;
+      border: none;
+      padding: 0.75rem 1.5rem;
+      border-radius: 8px;
+      font-family: inherit;
+      font-size: 1rem;
+      cursor: pointer;
+      transition: opacity 0.2s, transform 0.1s;
+    }
+
+    button:hover { opacity: 0.9; }
+    button:active { transform: scale(0.98); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .server-result {
+      margin-top: 1rem;
+      padding: 1rem;
+      border-radius: 8px;
+      background: rgba(74, 222, 128, 0.1);
+      border: 1px solid var(--success);
+      animation: fadeIn 0.3s ease;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .server-result.error {
+      background: rgba(239, 68, 68, 0.1);
+      border-color: #ef4444;
+    }
+
+    .server-result.drift {
+      background: rgba(251, 191, 36, 0.1);
+      border-color: var(--warning);
+    }
+
+    .code-block {
+      background: #0d1117;
+      border-radius: 8px;
+      padding: 1rem;
+      font-size: 0.85rem;
+      overflow-x: auto;
+      line-height: 1.5;
+    }
+
+    .code-block .keyword { color: #ff7b72; }
+    .code-block .function { color: #d2a8ff; }
+    .code-block .number { color: #79c0ff; }
+    .code-block .comment { color: #8b949e; }
+    .code-block .type { color: #7ee787; }
+
+    .toggle-container {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .toggle {
+      position: relative;
+      width: 60px;
+      height: 30px;
+      background: #333;
+      border-radius: 15px;
+      cursor: pointer;
+      transition: background 0.3s;
+    }
+
+    .toggle.on { background: var(--warning); }
+
+    .toggle::after {
+      content: '';
+      position: absolute;
+      width: 26px;
+      height: 26px;
+      background: white;
+      border-radius: 50%;
+      top: 2px;
+      left: 2px;
+      transition: left 0.3s;
+    }
+
+    .toggle.on::after { left: 32px; }
+
+    .warning-text {
+      color: var(--warning);
+      font-size: 0.9rem;
+    }
+
+    .loading {
+      display: none;
+      text-align: center;
+      padding: 2rem;
+      color: var(--muted);
+    }
+
+    .loading.visible { display: block; }
+
+    .loading-spinner {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 2px solid var(--muted);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin-right: 0.5rem;
+      vertical-align: middle;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .error-banner {
+      display: none;
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid #ef4444;
+      border-radius: 8px;
+      padding: 1rem;
+      margin-bottom: 1.5rem;
+      color: #ef4444;
+    }
+
+    .error-banner.visible { display: block; }
+
+    footer {
+      margin-top: 2rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--card);
+      color: var(--muted);
+      font-size: 0.8rem;
+      text-align: center;
+    }
+
+    footer a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>⚡ Unison WASM Demo</h1>
+  <p class="subtitle">Same code runs in browser (WASM) and server (native)</p>
+
+  <div class="error-banner" id="error-banner">
+    <strong>Error:</strong> <span id="error-message"></span>
+  </div>
+
+  <div class="loading" id="loading">
+    <span class="loading-spinner"></span>
+    Loading WASM module...
+  </div>
+
+  <div id="app" style="display: none;">
+    <div class="card">
+      <h2>Price Calculator</h2>
+
+      <div class="slider-container">
+        <label>Quantity:</label>
+        <input type="range" id="quantity" min="1" max="20" value="5">
+        <span class="quantity-display" id="qty-display">5</span>
+      </div>
+
+      <div class="price-breakdown">
+        <div class="price-row">
+          <span class="label">Unit Price</span>
+          <span class="value">$10.00</span>
+        </div>
+        <div class="price-row">
+          <span class="label">Subtotal</span>
+          <span class="value" id="subtotal">$50.00</span>
+        </div>
+        <div class="price-row discount">
+          <span class="label">Bulk Discount (10% off 5+)</span>
+          <span class="value" id="discount">-$5.00</span>
+        </div>
+        <div class="price-row total">
+          <span class="label">Total <span class="wasm-badge">WASM</span></span>
+          <span class="value" id="total">$45.00</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Server Verification</h2>
+      <button id="verify-btn">Verify with Server</button>
+      <div class="server-result" id="server-result" style="display: none;">
+        <span id="server-message"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>The Shared Code</h2>
+      <p style="color: var(--muted); font-size: 0.9rem; margin-bottom: 1rem;">
+        This exact function runs in both environments:
+      </p>
+      <div class="code-block">
+<span class="function">calculatePrice</span> : <span class="type">Nat</span> -> <span class="type">Nat</span>
+<span class="function">calculatePrice</span> quantity =
+  <span class="keyword">let</span> unitPrice = <span class="number">1000</span>  <span class="comment">-- $10.00 in cents</span>
+  <span class="keyword">let</span> subtotal = quantity * unitPrice
+  <span class="keyword">let</span> discount =
+    <span class="keyword">if</span> quantity >= <span class="number">5</span>
+    <span class="keyword">then</span> subtotal / <span class="number">10</span>  <span class="comment">-- 10% bulk discount</span>
+    <span class="keyword">else</span> <span class="number">0</span>
+  subtotal - discount
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>⚠️ Drift Mode</h2>
+      <p style="color: var(--muted); font-size: 0.9rem; margin-bottom: 1rem;">
+        Simulate what happens when frontend and backend have different code:
+      </p>
+      <div class="toggle-container">
+        <div class="toggle" id="drift-toggle"></div>
+        <span id="drift-label">OFF — Using shared Unison code</span>
+      </div>
+      <p class="warning-text" id="drift-warning" style="display: none; margin-top: 1rem;">
+        ⚠️ Drift mode: Server uses 15% discount instead of 10%.<br>
+        This simulates the bugs that happen with duplicated code!
+      </p>
+    </div>
+  </div>
+
+  <footer>
+    Built with <a href="https://unison-lang.org">Unison</a> + WebAssembly<br>
+    <a href="https://github.com/unisonweb/unison">View Source</a>
+  </footer>
+
+  <script type="module" src="./dist/demo.js"></script>
+</body>
+</html>
+

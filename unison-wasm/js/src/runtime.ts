@@ -604,6 +604,36 @@ export class UnisonRuntime {
   }
 
   /**
+   * Allocate a Text object in WASM memory from a JavaScript string.
+   *
+   * @param str - JavaScript string to store
+   * @returns Pointer to OBJ_TEXT in WASM memory
+   */
+  allocText(str: string): Ptr32 {
+    if (!this.exports) {
+      throw new Error('No WASM module loaded');
+    }
+
+    const encoder = new TextEncoder();
+    const bytes = encoder.encode(str);
+
+    // Check if __alloc_text export exists
+    const allocFn = this.exports['__alloc_text'];
+    if (typeof allocFn !== 'function') {
+      throw new Error('__alloc_text export not found - text allocation not supported by this module');
+    }
+
+    // Call WASM allocator: __alloc_text(byteLen) -> ptr
+    const ptr = allocFn(bytes.length) as Ptr32;
+
+    // Copy bytes to WASM memory at TEXT_BYTES_OFFSET
+    const view = new Uint8Array(this.memory!.buffer, ptr + TEXT_BYTES_OFFSET, bytes.length);
+    view.set(bytes);
+
+    return ptr;
+  }
+
+  /**
    * Read raw bytes from memory.
    */
   getBytes(ptr: Ptr32, len: number): Uint8Array {
@@ -866,6 +896,40 @@ export class UnisonRuntime {
     this.pendingContinuations.clear();
     this.resolveRun = null;
     this.rejectRun = null;
+  }
+
+  /**
+   * Expose the runtime to browser dev tools for debugging.
+   *
+   * After calling this, you can access the runtime in the browser console:
+   * ```javascript
+   * unisonRuntime.dumpHeap()
+   * unisonRuntime.inspectValue(0x4000)
+   * unisonRuntime.call('calculatePrice', 5n)
+   * ```
+   *
+   * @param name - Global variable name (default: 'unisonRuntime')
+   */
+  exposeToDevTools(name: string = 'unisonRuntime'): void {
+    // Access window in a way that works for both browser and Node.js
+    const globalObj = typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : {});
+
+    (globalObj as Record<string, unknown>)[name] = {
+      runtime: this,
+      dumpHeap: () => this.dumpHeap(),
+      inspectValue: (ptr: Ptr32) => this.inspectValue(ptr),
+      handles: () => this.handles.getAll(),
+      memory: () => this.memory,
+      call: (funcName: string, ...args: any[]) => this.call(funcName, ...args),
+      callBigInt: (funcName: string, ...args: any[]) => this.callBigInt(funcName, ...args),
+      getText: (ptr: Ptr32) => this.getText(ptr),
+      allocText: (str: string) => this.allocText(str),
+      reset: () => this.reset(),
+      asyncState: () => AsyncState[this.asyncState],
+      pendingContinuations: () => this.pendingContinuations.size,
+    };
+
+    console.log(`🔧 Unison runtime exposed as window.${name}`);
   }
 
   /**

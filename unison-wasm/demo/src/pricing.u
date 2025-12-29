@@ -1,0 +1,51 @@
+-- pricing.u
+-- This file runs on BOTH server (native Unison) and browser (WASM)
+--
+-- The core pricing logic is shared between environments.
+-- No duplication = no drift = no bugs.
+
+-- Calculate total price in cents
+-- @param quantity Number of items
+-- @returns Total price in cents (e.g., 4500 = $45.00)
+calculatePrice : Nat -> Nat
+calculatePrice quantity =
+  unitPrice = 1000  -- $10.00 in cents
+  subtotal = quantity * unitPrice
+  discount = if quantity >= 5 then subtotal / 10 else 0
+  subtotal - discount
+
+-- Calculate just the discount amount in cents
+-- @param quantity Number of items
+-- @returns Discount in cents (e.g., 500 = $5.00)
+calculateDiscount : Nat -> Nat
+calculateDiscount quantity =
+  unitPrice = 1000
+  subtotal = quantity * unitPrice
+  if quantity >= 5 then subtotal / 10 else 0
+
+-- Calculate subtotal before discount
+-- @param quantity Number of items
+-- @returns Subtotal in cents
+calculateSubtotal : Nat -> Nat
+calculateSubtotal quantity = quantity * 1000
+
+-- Check if bulk discount applies
+-- @param quantity Number of items
+-- @returns True if quantity >= 5
+hasBulkDiscount : Nat -> Boolean
+hasBulkDiscount quantity = quantity >= 5
+
+-- Calculate price and log the result
+-- This demonstrates foreign calls (IO abilities) working in WASM
+-- The same IO.printNat call works in:
+--   - Browser: calls console.log via JS host
+--   - Server: calls console.log via Node.js
+--
+-- @param quantity Number of items
+-- @returns Total price in cents (also logged)
+calculatePriceWithLog : Nat ->{IO} Nat
+calculatePriceWithLog quantity =
+  price = calculatePrice quantity
+  printLine (Nat.toText price)  -- Foreign call: logs to console
+  price
+

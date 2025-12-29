@@ -1,2 +1,4 @@
 js/dist
 js/node_modules
+demo/dist
+demo/node_modules

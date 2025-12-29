@@ -1928,6 +1928,8 @@ builtinToPrimOp "Nat./" 2 = Just [I64DivU]
 builtinToPrimOp "Nat.mod" 2 = Just [I64RemU]
 builtinToPrimOp "Nat.<=" 2 = Just [I64LeU, I64ExtendI32U]  -- Comparison returns i32, extend to i64
 builtinToPrimOp "Nat.<" 2 = Just [I64LtU, I64ExtendI32U]
+builtinToPrimOp "Nat.>=" 2 = Just [I64GeU, I64ExtendI32U]
+builtinToPrimOp "Nat.>" 2 = Just [I64GtU, I64ExtendI32U]
 builtinToPrimOp "Nat.==" 2 = Just [I64Eq, I64ExtendI32U]
 builtinToPrimOp "Universal.==" 2 = Just [I64Eq, I64ExtendI32U]
 -- Int operations

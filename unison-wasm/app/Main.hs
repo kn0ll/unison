@@ -3,9 +3,10 @@
 -- This executable compiles Unison code to WAT (WebAssembly Text format).
 --
 -- Usage:
---   unison-wasm-poc compile <name> <code> -- Compile Unison code to WAT
---   unison-wasm-poc types <name>          -- Generate TypeScript definitions
---   unison-wasm-poc debug <code>          -- Show parsed SuperGroup structure
+--   unison-wasm-poc compile <name> <code>   -- Compile Unison code to WAT
+--   unison-wasm-poc compile-file <name> <file> -- Compile .u file to WAT
+--   unison-wasm-poc types <name>            -- Generate TypeScript definitions
+--   unison-wasm-poc debug <code>            -- Show parsed SuperGroup structure
 module Main where
 
 import Data.Functor.Identity (Identity, runIdentity)
@@ -83,17 +84,11 @@ main = do
     ["compile", name, code] -> do
       -- Parse actual Unison code and compile to WAT
       -- Uses the full pipeline: parse → lamLift → superNormalize → compile
-      case parseAndCompile code of
-        Left parseErr -> do
-          hPutStrLn stderr $ "Parse error: " ++ parseErr
-          exitFailure
-        Right (sg, liftedCtx) -> do
-          -- Compile main group + lifted combinators
-          case compileGroupWithLifted sg liftedCtx name of
-            Left compileErr -> do
-              hPutStrLn stderr $ "Compilation error: " ++ show compileErr
-              exitFailure
-            Right wasm -> putStr (emitModule wasm)
+      compileCode name code
+    ["compile-file", name, filePath] -> do
+      -- Read code from a .u file and compile to WAT
+      code <- readFile filePath
+      compileCode name code
     ["types", name] -> do
       -- Generate TypeScript type definitions for a compiled module
       -- Currently generates a template with common exports; real implementation
@@ -115,6 +110,21 @@ main = do
       usage
       exitFailure
 
+-- | Compile Unison code string to WAT and print it
+compileCode :: String -> String -> IO ()
+compileCode name code =
+  case parseAndCompile code of
+    Left parseErr -> do
+      hPutStrLn stderr $ "Parse error: " ++ parseErr
+      exitFailure
+    Right (sg, liftedCtx) -> do
+      -- Compile main group + lifted combinators
+      case compileGroupWithLifted sg liftedCtx name of
+        Left compileErr -> do
+          hPutStrLn stderr $ "Compilation error: " ++ show compileErr
+          exitFailure
+        Right wasm -> putStr (emitModule wasm)
+
 -- | Parse a type argument string to TsType
 parseTypeArg :: String -> TsType
 parseTypeArg "Nat" = TsBigInt
@@ -131,6 +141,7 @@ usage = do
   hPutStrLn stderr ""
   hPutStrLn stderr "Commands:"
   hPutStrLn stderr "  compile <name> <code>           Compile Unison code to WAT"
+  hPutStrLn stderr "  compile-file <name> <file>      Compile .u file to WAT"
   hPutStrLn stderr "  types <name>                    Generate TypeScript .d.ts (default: Nat -> Nat)"
   hPutStrLn stderr "  types <name> <arg> <ret>        Generate .d.ts with explicit types"
   hPutStrLn stderr "  debug <code>                    Show parsed SuperGroup structure"
@@ -139,6 +150,7 @@ usage = do
   hPutStrLn stderr ""
   hPutStrLn stderr "Examples:"
   hPutStrLn stderr "  unison-wasm-poc compile increment '##Nat.+ p0 1'"
+  hPutStrLn stderr "  unison-wasm-poc compile-file pricing src/pricing.u"
   hPutStrLn stderr "  unison-wasm-poc types factorial"
   hPutStrLn stderr "  unison-wasm-poc types greet Text Text"
   hPutStrLn stderr "  unison-wasm-poc compile factorial \\"

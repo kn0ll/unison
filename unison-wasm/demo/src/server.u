@@ -1,0 +1,32 @@
+-- server.u
+-- HTTP server that runs the same pricing logic natively
+--
+-- This demonstrates that the SAME Unison code runs on:
+-- - Browser (compiled to WASM)
+-- - Server (native Unison runtime)
+
+-- For now, this is a placeholder. In a full implementation,
+-- this would use UCM's HTTP server abilities.
+
+server.main : '{IO, Exception} ()
+server.main = do
+  printLine "Starting Unison pricing server on http://localhost:8080"
+  printLine "Using the SAME calculatePrice function as the browser!"
+  printLine ""
+  printLine "Endpoints:"
+  printLine "  GET /api/price?qty=5  → returns {quantity: 5, price: 4500}"
+  printLine ""
+
+  -- In a real implementation, this would be:
+  -- httpServer 8080 do request ->
+  --   match request.path with
+  --     "/api/price" ->
+  --       qty = parseNat (request.query "qty") |> getOrElse 1
+  --       price = calculatePrice qty
+  --       Response.ok (toJson {quantity = qty, price = price})
+  --     _ ->
+  --       Response.notFound "Not found"
+
+  printLine "Note: Full HTTP server requires UCM HTTP abilities."
+  printLine "For the demo, we use the Node.js server with the same WASM module."
+

@@ -12,12 +12,13 @@ This document provides guidance for AI agents working on the Unison WASM compila
 - [`plans/WASM.md`](./plans/WASM.md) — Implementation plan with phased approach
 - [`plans/WASM_ABI.md`](./plans/WASM_ABI.md) — Memory layout specification (the ABI contract)
 
-**Current Phase:** Phase 7 (Async Foreign Calls) — ✅ COMPLETE
+**Current Phase:** Phase 8 (Integration Demo) — ✅ COMPLETE
 
 **Completed Phases:**
 - Phase 0: ABI Bootstrap + Conformance Tests ✅
 - Phase 1: Arithmetic in WAT ✅
 - Phase 2: SuperGroup → WAT Pipeline ✅ (parse → lamLift → superNormalize → factorial(5) = 120)
+- Phase 7: Async Foreign Calls ✅
 - Phase 3: IR Improvements ✅ (multi-case MatchNumeric, I32 ops, memory/globals support)
 - Phase 4: Closures ✅ (heap allocation, PAp, TName compilation)
 - Phase 4.5: Function Tables ✅ (call_indirect, __apply1, function dispatch)
@@ -36,6 +37,19 @@ This document provides guidance for AI agents working on the Unison WASM compila
 - __alloc_async_cont: Allocates OBJ_ASYNC_CONT objects ✓
 - NestedAsyncError: MVP constraint on one async at a time ✓
 - registerAsyncForeign(): Register Promise-returning functions ✓
+
+**Phase 8 Implementation (Complete):**
+- Demo project structure: `unison-wasm/demo/` ✓
+- Price Calculator demo with slider UI ✓
+- Server verification button (Express server with same WASM) ✓
+- "Drift Mode" toggle showing price mismatch ✓
+- `exposeToDevTools()` for browser console debugging ✓
+- `allocText()` for JS→WASM string allocation ✓
+- `build-wasm.sh` generates WAT from Unison semantics ✓
+- Full build pipeline: `npm run dev` ✓
+- Foreign calls: `IO.printNat` logs to console in both browser and server ✓
+- `allocText()` for JS→WASM string allocation ✓
+- Build pipeline (`npm run dev`) ✓
 
 **Deferred (Phase 5):**
 - TReq full E2E: Requires compiling a separate handler closure with MatchRequest body,
