@@ -133,7 +133,7 @@ testArithmetic =
     ]
 
 --------------------------------------------------------------------------------
--- Foreign Call Tests (Phase 6)
+-- Foreign Call Tests
 --------------------------------------------------------------------------------
 
 -- Note: Foreign call tests are in Abilities.hs since they require manually

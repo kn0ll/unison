@@ -1,5 +1,5 @@
 /**
- * Tests for the UnisonRuntime class (Phase 6: Foreign Calls)
+ * Tests for the UnisonRuntime class
  */
 
 import { describe, it } from 'node:test';

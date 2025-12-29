@@ -1,4 +1,4 @@
--- | Phase 5 Ability Verification Tests
+-- | Ability Verification Tests
 --
 -- These tests verify that the ability compilation infrastructure works correctly
 -- by manually constructing ANormal IR that uses THnd, TShift, and TKon.
@@ -150,7 +150,7 @@ test =
   scope "abilities" . tests $
     [ testTHndCompiles,
       testTShiftCompiles,
-      testPhase5Status,
+      testAbilityStatus,
       -- E2E tests that actually run through wasmtime:
       testTHndE2E,
       testTHndNested,
@@ -161,7 +161,7 @@ test =
       testMatchRequestAbilityDispatch,
       testLocalsPreserved,
       testTReqE2E,
-      -- Phase 6: Foreign call tests
+      -- Foreign call tests
       testForeignCallImport,
       testForeignCallWat,
       testMultipleForeignCalls
@@ -707,11 +707,11 @@ testTReqE2E =
 -- Status Test
 --------------------------------------------------------------------------------
 
--- | This test documents the current Phase 5 status
-testPhase5Status :: Test ()
-testPhase5Status =
-  scope "phase5_status" $ do
-    note "=== Phase 5 Ability Status ==="
+-- | This test documents the ability implementation status
+testAbilityStatus :: Test ()
+testAbilityStatus =
+  scope "ability_status" $ do
+    note "=== Ability Implementation Status ==="
     note ""
     note "E2E VERIFIED (via wasmtime):"
     note "  ✓ THnd: install handler, run body, return result"
@@ -732,7 +732,7 @@ testPhase5Status =
     note "    All components verified individually; integrated path untested."
     note "    Low risk: TReq generates same patterns as TShift (which is E2E verified)."
     note ""
-    note "Phase 5 COMPLETE (with noted deferral)!"
+    note "Ability support COMPLETE (with noted deferral)!"
     ok
 
 --------------------------------------------------------------------------------
@@ -769,7 +769,7 @@ testCaptureResume =
 -}
 
 --------------------------------------------------------------------------------
--- Phase 6: Foreign Call Tests
+-- Foreign Call Tests
 --------------------------------------------------------------------------------
 
 -- | Test that TFOp generates an import declaration

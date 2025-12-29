@@ -50,7 +50,7 @@ data WatFuncType = WatFuncType
   }
   deriving (Eq, Show)
 
--- | WASM instructions (subset needed for current phases)
+-- | WASM instructions
 data WatInstr
   = -- | Get a local variable: @local.get $name@
     LocalGet String
@@ -267,7 +267,7 @@ data WatModule = WatModule
     moduleFuncTypes :: [WatFuncType],
     -- | Function table entries (function names to include in table)
     moduleTableFuncs :: [String],
-    -- | Imports from host (Phase 6: foreign calls)
+    -- | Imports from host (foreign calls)
     moduleImports :: [WatImport]
   }
   deriving (Eq, Show)
@@ -458,7 +458,7 @@ emitModule m =
                       else " (result " ++ unwords (map emitValType (funcTypeResults ft)) ++ ")"
       in "  (type $" ++ funcTypeName ft ++ " (func" ++ params ++ results ++ "))"
 
-    -- Import declarations (Phase 6: foreign calls)
+    -- Import declarations (foreign calls)
     importDecls = map emitImport (moduleImports m)
 
     emitImport imp =

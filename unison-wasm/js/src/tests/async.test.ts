@@ -1,5 +1,5 @@
 /**
- * Tests for Phase 7: Async Foreign Calls
+ * Tests for Async Foreign Calls
  *
  * Tests the ContinuationHandle, AsyncState, and async yield/resume cycle.
  */

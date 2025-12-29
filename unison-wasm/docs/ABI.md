@@ -1,10 +1,6 @@
 # WASM ABI Specification
 
-**Version:** 0.1.0 (draft)
-
-**Related:**
-- [`WASM.md`](./WASM.md) — Implementation plan (Phase 0 generates constants from this spec)
-- [`AGENTS.md`](../AGENTS.md) — AI agent guidance, codebase conventions, pitfalls
+**Version:** 0.1.0
 
 This document defines the memory layout and calling conventions for the Unison WASM runtime. Changes to this specification are breaking changes that require version bumps.
 
@@ -29,13 +25,14 @@ Keeping these aligned ensures behavioral equivalence and eases debugging.
 
 | Native (`Stack.hs`) | WASM ABI | Notes |
 |---------------------|----------|-------|
-| `GPAp` | `OBJ_PAP` (0x005) | Partial application |
 | `GEnum` | `OBJ_ENUM` (0x001) | Nullary constructor |
 | `GData1` | `OBJ_DATA1` (0x002) | 1-field constructor |
 | `GData2` | `OBJ_DATA2` (0x003) | 2-field constructor |
 | `GDataG` | `OBJ_DATAG` (0x004) | N-field constructor |
+| `GPAp` | `OBJ_PAP` (0x005) | Partial application |
 | `GCaptured` | `OBJ_CAPTURED` (0x006) | Captured continuation |
 | `GForeign` | `OBJ_FOREIGN` (0x007) | Opaque JS handle |
+| (WASM-only) | `OBJ_ASYNC_CONT` (0x00B) | Async yield/resume state |
 | `GUnboxedTypeTag` | `TYPE_*` constants | Type discriminator for unboxed values |
 
 ### K Frame → FrameTag Mapping
@@ -72,7 +69,7 @@ Our `MatchData` compilation correctly compares constructor IDs only.
 |--------|--------|------|-----------|
 | PAp function ref | `CombIx` (Reference + indices) | `func_id` (table index) | WASM uses `call_indirect` |
 | RSection caching | Stored in Push frames | Computed from CombIx | Different execution model |
-| DEnv | `EnumMap Word64 Closure` | TBD (Phase 5) | Needs design |
+| DEnv | `EnumMap Word64 Closure` | Array-based map | Simpler for WASM |
 
 ### Reference Functions
 
@@ -245,16 +242,17 @@ All heap objects share a common header:
 ObjTag values identify heap object types. Use `OBJ_*` prefix (distinct from `TYPE_*` TypeTag values):
 
 ```
-OBJ_ENUM      = 0x001  - Nullary data constructor
-OBJ_DATA1     = 0x002  - Unary data constructor
-OBJ_DATA2     = 0x003  - Binary data constructor
-OBJ_DATAG     = 0x004  - General data constructor (N fields)
-OBJ_PAP       = 0x005  - Partial application (closure)
-OBJ_CAPTURED  = 0x006  - Captured continuation
-OBJ_FOREIGN   = 0x007  - Foreign/opaque JS reference
-OBJ_TEXT      = 0x008  - UTF-8 text (special handling)
-OBJ_BYTES     = 0x009  - Raw byte array
-OBJ_SEQUENCE  = 0x00A  - Unison sequence
+OBJ_ENUM       = 0x001  - Nullary data constructor
+OBJ_DATA1      = 0x002  - Unary data constructor
+OBJ_DATA2      = 0x003  - Binary data constructor
+OBJ_DATAG      = 0x004  - General data constructor (N fields)
+OBJ_PAP        = 0x005  - Partial application (closure)
+OBJ_CAPTURED   = 0x006  - Captured continuation
+OBJ_FOREIGN    = 0x007  - Foreign/opaque JS reference
+OBJ_TEXT       = 0x008  - UTF-8 text (special handling)
+OBJ_BYTES      = 0x009  - Raw byte array
+OBJ_SEQUENCE   = 0x00A  - Unison sequence
+OBJ_ASYNC_CONT = 0x00B  - Async continuation (yield/resume)
 ```
 
 ---
@@ -464,6 +462,31 @@ Total: 16 + (N * 16) bytes
 ```
 
 **Note**: This is a simple array representation. Future optimizations may use finger trees or other structures for efficient concatenation.
+
+### AsyncCont (OBJ_ASYNC_CONT = 0x00B) - Async Continuation
+
+```
+┌────────────────────────────────────────┐
+│ Header (64 bits) - ObjTag=0x00B        │  ← bytes 0-7
+├────────────────────────────────────────┤
+│ ContId (64 bits)                       │  ← bytes 8-15
+├────────────────────────────────────────┤
+│ KPtr (32) │ LocalsPtr (32)             │  ← bytes 16-23
+├────────────────────────────────────────┤
+│ LocalsCount (32) │ Status (32)         │  ← bytes 24-31
+└────────────────────────────────────────┘
+Total: 32 bytes
+```
+
+| Field | Description |
+|-------|-------------|
+| `ContId` | Unique ID for JS-side `ContinuationHandle` reference |
+| `KPtr` | Saved K stack pointer |
+| `LocalsPtr` | Pointer to saved locals array |
+| `LocalsCount` | Number of saved locals |
+| `Status` | 0=pending, 1=resumed, 2=freed |
+
+**Linearity**: Each async continuation is resumed **exactly once**. The JS runtime enforces this via the `ContinuationHandle.consumed` flag.
 
 ---
 
@@ -957,6 +980,7 @@ export function apply<A, R>(closure: Closure<[A], R>, arg: A): R;
 | `Text` | `Foreign (Wrap Rf.textRef ...)` |
 | `Bytes` | `Foreign (Wrap Rf.bytesRef ...)` |
 | `Sequence` | `USeq` (Seq Val) |
+| `AsyncCont` | (WASM-only, for async yield/resume) |
 | `K` frames | `data K` |
 | `TypedSlot` | `Val` |
 | `TypeTag` | `UnboxedTypeTag` |
@@ -967,16 +991,17 @@ These constants should be code-generated from this spec to ensure consistency:
 
 ```
 // Object tags (OBJ_* prefix) - identify heap object types
-OBJ_ENUM      = 0x001
-OBJ_DATA1     = 0x002
-OBJ_DATA2     = 0x003
-OBJ_DATAG     = 0x004
-OBJ_PAP       = 0x005
-OBJ_CAPTURED  = 0x006
-OBJ_FOREIGN   = 0x007
-OBJ_TEXT      = 0x008
-OBJ_BYTES     = 0x009
-OBJ_SEQUENCE  = 0x00A
+OBJ_ENUM       = 0x001
+OBJ_DATA1      = 0x002
+OBJ_DATA2      = 0x003
+OBJ_DATAG      = 0x004
+OBJ_PAP        = 0x005
+OBJ_CAPTURED   = 0x006
+OBJ_FOREIGN    = 0x007
+OBJ_TEXT       = 0x008
+OBJ_BYTES      = 0x009
+OBJ_SEQUENCE   = 0x00A
+OBJ_ASYNC_CONT = 0x00B
 
 // Type tags (TYPE_* prefix) - discriminate TypedSlot payloads
 TYPE_NAT      = 0x00
@@ -995,6 +1020,15 @@ TYPED_SLOT_SIZE   = 16
 HEADER_SIZE       = 8
 PAP_HEADER_SIZE   = 24  // header + CombIx + arity fields
 PUSH_FRAME_HEADER = 24  // fixed header before saved locals (see Push Frame layout)
+ASYNC_CONT_SIZE   = 32  // async continuation object size
+
+// Async continuation status values
+ASYNC_STATUS_PENDING  = 0
+ASYNC_STATUS_RESUMED  = 1
+ASYNC_STATUS_FREED    = 2
+
+// Yield sentinel (magic value indicating async yield)
+YIELD_SENTINEL = 0xFFFFFFFFFFFFFFFE  // cannot be valid Nat/Int/pointer
 
 // Memory layout (canonical: heap UP, stack DOWN)
 MEMORY_NULL_ZONE_START  = 0x0000

@@ -15,8 +15,8 @@
 -- * Closures and partial application (TName → PAp allocation, call_indirect)
 -- * Sum types / enums (FCon, MatchData)
 --
--- NOT YET supported (Phase 6+):
--- * Async foreign calls to JS host
+-- FUTURE:
+-- * Async foreign calls with nested continuations
 module Unison.Wasm.Compile
   ( -- * Compilation
     compileGroup,
@@ -33,7 +33,7 @@ module Unison.Wasm.Compile
     setBaseLocalCount,
     getSaveableLocalCount,
 
-    -- * Foreign Calls (Phase 6)
+    -- * Foreign Calls
     foreignFuncToImportName,
     collectForeignCalls,
     foreignFuncsToImports,
@@ -89,7 +89,7 @@ data CompileError
     UnboundVariable Text
   | -- | Unsupported primitive operation
     UnsupportedPrimOp POp
-  | -- | Unsupported construct (Phase limitation)
+  | -- | Unsupported construct
     UnsupportedConstruct Text
   | -- | Wrong number of arguments for primitive
     WrongArity POp Int Int -- expected, actual
@@ -179,7 +179,7 @@ bindVars bindings ctx =
 -- the ANF output and updating the K-frame implementation.
 memToValType :: Mem -> WatValType
 memToValType UN = I64 -- Unboxed: 64-bit value
-memToValType BX = I64 -- TODO(Phase 5): change to I32 for proper pointers
+memToValType BX = I64 -- TODO: optimize to I32 for 32-bit pointers
 
 -- | Generate a short function name from a Reference
 -- Uses base32hex encoding for hash, truncated for readability
@@ -550,7 +550,7 @@ compileANormal ctx (TVar v) = do
 compileANormal _ctx (TLit lit) = do
   compileLit lit
 
--- Boxed literal: same as TLit for now (Phase 3: heap alloc deferred to Phase 3.5)
+-- Boxed literal: same as TLit for now (heap alloc for sum types handled separately)
 compileANormal _ctx (TBLit lit) = do
   compileLit lit
 
@@ -972,7 +972,7 @@ compileANormal ctx (TName v f args bo) = do
   pure $ allocInstrs ++ storeInstrs ++ bodyInstrs
 
 --------------------------------------------------------------------------------
--- Ability Handler Constructs (Phase 5)
+-- Ability Handler Constructs
 --------------------------------------------------------------------------------
 
 -- THnd: Install an ability handler (push Mark frame)
@@ -1987,7 +1987,7 @@ floatCmpOp op =
   ]
 
 --------------------------------------------------------------------------------
--- Foreign Function Imports (Phase 6)
+-- Foreign Function Imports
 --------------------------------------------------------------------------------
 
 -- | Convert a ForeignFunc to a WASM import function name.

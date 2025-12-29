@@ -1,8 +1,8 @@
 /**
  * ABI Constants for Unison WASM Runtime
  *
- * GENERATED FROM: plans/WASM_ABI.md
- * DO NOT EDIT MANUALLY - these constants must match the spec exactly.
+ * These constants are derived from: unison-wasm/docs/ABI.md
+ * Changes must be kept in sync with ABI.md and src/Unison/Wasm/ABI.hs.
  *
  * @module abi-constants
  */

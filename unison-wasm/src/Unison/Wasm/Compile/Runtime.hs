@@ -877,14 +877,14 @@ runtimeFunctions =
     allocDenvFunction,
     denvLookupFunction,
     denvInsertFunction,
-    -- Async functions (Phase 7)
+    -- Async continuation functions
     allocAsyncContFunction,
     resumeFunction
   ]
     ++ map mkApplyFunction [1 .. 3] -- Generate __apply1, __apply2, __apply3
 
 --------------------------------------------------------------------------------
--- Async Continuation Support (Phase 7)
+-- Async Continuation Support
 --------------------------------------------------------------------------------
 
 -- | Allocate an async continuation object: @__alloc_async_cont(cont_id, k_ptr, locals_ptr, locals_count) -> i32@

@@ -291,7 +291,7 @@ testModule =
         let instr = CallIndirect "unary_i64"
         expectEqual (emitInstr instr) "call_indirect (type $unary_i64)",
       scope "with_imports" $ do
-        -- Test that imports are emitted correctly (Phase 6: foreign calls)
+        -- Test that imports are emitted correctly (foreign calls)
         let imp = WatImport
               { importModule = "unison",
                 importName = "printLine",

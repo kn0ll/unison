@@ -3,7 +3,7 @@
 -- | ABI constants for WASM compilation target.
 --
 -- This module provides the canonical Haskell definitions for the WASM ABI
--- specified in plans/WASM_ABI.md. These constants MUST match the JavaScript
+-- specified in unison-wasm/docs/ABI.md. These constants MUST match the JavaScript
 -- runtime's abi-constants.ts exactly.
 --
 -- == ABI Version

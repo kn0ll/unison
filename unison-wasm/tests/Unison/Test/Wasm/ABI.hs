@@ -3,7 +3,7 @@
 -- | Haskell tests for ABI constants.
 --
 -- These tests verify that the Haskell ABI module matches the specification
--- in plans/WASM_ABI.md. The JavaScript tests verify round-trip allocation
+-- in unison-wasm/docs/ABI.md. The JavaScript tests verify round-trip allocation
 -- and decoding; these tests verify the Haskell constants and encoding functions.
 module Unison.Test.Wasm.ABI where
 

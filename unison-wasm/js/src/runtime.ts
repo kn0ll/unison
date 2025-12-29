@@ -1,5 +1,5 @@
 /**
- * Unison WASM Runtime - Phase 7: Async Foreign Calls
+ * Unison WASM Runtime
  *
  * This module provides the main runtime class for loading and executing
  * Unison WASM modules with JS interop, including async operations.

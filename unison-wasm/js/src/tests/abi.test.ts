@@ -2,7 +2,7 @@
  * ABI Conformance Tests for Unison WASM Backend
  *
  * These tests verify that the JS runtime correctly implements the ABI
- * specified in plans/WASM_ABI.md.
+ * specified in unison-wasm/docs/ABI.md.
  *
  * These tests must stay in sync with the Haskell ABI constants in
  * Unison.Wasm.ABI and the TypeScript constants in abi-constants.ts.

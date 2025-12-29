@@ -725,22 +725,22 @@ testPartialReturn =
     ]
 
 --------------------------------------------------------------------------------
--- Phase 5 Tests: Data Types and Abilities
+-- Data Types and Abilities Tests
 --------------------------------------------------------------------------------
--- Tests for Phase 5 features. Note: Full ability tests require THnd/TShift
+-- Tests for data types and abilities. Note: Full ability tests require THnd/TShift
 -- which are now compiled but need end-to-end testing with proper Unison
 -- source that uses `handle` and ability operations.
 --
--- The current tests verify that the Phase 5 compiler changes don't break
+-- The current tests verify that the compiler changes don't break
 -- existing functionality. True ability tests would require parsing
 -- `handle` and ability requests, which needs integration with UCM.
 
 testDataTypes :: Test ()
 testDataTypes =
-  scope "phase5" . tests $
+  scope "data_types" . tests $
     [
-      -- Verify pattern matching still works after Phase 5 changes
-      testE2E "match_zero_phase5"
+      -- Verify pattern matching still works
+      testE2E "match_zero"
         (intercalate "\n"
           [ "let"
           , "f n = match n with"
@@ -751,7 +751,7 @@ testDataTypes =
         (WasmI64 42),
 
       -- Multi-case match - tests compileIfElseChain
-      testE2E "match_multi_phase5"
+      testE2E "match_multi"
         (intercalate "\n"
           [ "let"
           , "classify x = match x with"
