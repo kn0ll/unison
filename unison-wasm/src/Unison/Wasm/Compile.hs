@@ -21,7 +21,7 @@ module Unison.Wasm.Compile
   ( -- * Compilation
     compileGroup,
     compileGroupWithLifted,
-    compileSuperNormal,
+    compileMultipleWithLifted,
     CompileError (..),
     CompileResult,
 
@@ -294,6 +294,68 @@ compileGroupWithLifted (Rec localDefs entry) liftedGroups exportName = do
         moduleImports = imports
       }
 
+-- | Compile multiple entry points into a single WASM module.
+--
+-- Each entry is a (SuperGroup, exportName) pair.
+-- All entries share the same lifted combinators (dependencies).
+compileMultipleWithLifted ::
+  (Var v) =>
+  [(SuperGroup Reference v, String)] ->
+  [(Reference, SuperGroup Reference v)] ->
+  CompileResult WatModule
+compileMultipleWithLifted entries liftedGroups = do
+  -- Build a map from Reference to function name for all lifted combinators
+  let refNames = Map.fromList [(ref, refToFuncName ref) | (ref, _) <- liftedGroups]
+
+  -- Build a map from Reference to arity for all lifted combinators
+  let refArities = Map.fromList [(ref, superGroupArity sg) | (ref, sg) <- liftedGroups]
+
+  -- Build a map from Reference to table index
+  let refTableIndices = Map.fromList $ zip (map fst liftedGroups) [0..]
+
+  -- Compile lifted combinators first
+  liftedFuncs <- concat <$> mapM (compileLiftedGroup refNames refArities refTableIndices) liftedGroups
+
+  -- Compile each entry point
+  entryFuncsWithLocals <- mapM (\(Rec localDefs entry, exportName) -> do
+    -- Build function name map for local definitions in this entry's group
+    let funcNames = Map.fromList [(v, Text.unpack (Var.name v)) | (v, _) <- localDefs]
+    let funcArities = Map.fromList [(v, superNormalArity sn) | (v, sn) <- localDefs]
+
+    -- Compile local definitions
+    localFuncs <- mapM (compileLocalDefWithRefCtx funcNames funcArities refNames refArities refTableIndices exportName) localDefs
+
+    -- Compile entry function
+    entryFunc <- compileSuperNormalWithRefCtx funcNames funcArities refNames refArities refTableIndices exportName entry exportName
+
+    pure (localFuncs, entryFunc)) entries
+
+  let allLocalFuncs = concatMap fst entryFuncsWithLocals
+      allEntryFuncs = map snd entryFuncsWithLocals
+      exportNames = map snd entries
+
+  -- Merge: runtime + lifted functions + local functions + entry functions
+  let allFuncs = Runtime.runtimeFunctions ++ liftedFuncs ++ allLocalFuncs ++ allEntryFuncs
+      -- Build function table with all user functions (for call_indirect)
+      userFuncs = liftedFuncs ++ allLocalFuncs ++ allEntryFuncs
+      tableFuncs = map funcName userFuncs
+
+  -- Collect foreign calls from all SuperGroups
+  let allForeignCalls = concatMap (\(sg, _) -> collectForeignCallsFromGroups sg liftedGroups) entries
+      imports = foreignFuncsToImports allForeignCalls
+
+  pure
+    WatModule
+      { moduleMemory = Just 1,
+        moduleGlobals = Runtime.runtimeGlobals,
+        moduleFunctions = allFuncs,
+        moduleExports = exportNames ++ Runtime.runtimeExports,
+        moduleMemoryExport = Just "memory",
+        moduleFuncTypes = Runtime.runtimeFuncTypes,
+        moduleTableFuncs = tableFuncs,
+        moduleImports = imports
+      }
+
 -- | Get the arity of a SuperGroup (from its entry point)
 superGroupArity :: SuperGroup ref v -> Int
 superGroupArity (Rec _ entry) = superNormalArity entry
@@ -410,14 +472,6 @@ compileLocalDef funcNames currentFunc (v, sn) = do
   let funcName = Text.unpack (Var.name v)
   compileSuperNormalWithCtx funcNames currentFunc sn funcName
 
--- | Compile a SuperNormal to a WatFunction (legacy, uses empty context)
-compileSuperNormal ::
-  (Var v) =>
-  SuperNormal Reference v ->
-  String ->
-  CompileResult WatFunction
-compileSuperNormal = compileSuperNormalWithCtx Map.empty ""
-
 -- | Compile a SuperNormal to a WatFunction with function context
 compileSuperNormalWithCtx ::
   (Var v) =>
@@ -503,6 +557,28 @@ collectLocals ctx (TMatch _ (MatchNumeric _ref cases defaultCase)) =
    in case defaultCase of
         Just defBody -> collectLocals ctxFromCases defBody
         Nothing -> ctxFromCases
+collectLocals ctx (TMatch _ (MatchData _ref cases defaultCase)) =
+  -- Collect from all branches, including field bindings for each case
+  let collectCase (_, (mems, body)) c =
+        -- Extract field variables from TAbs wrappers and bind them
+        let (fieldVars, innerBody) = extractAbsVars body
+            fieldBindings = zip fieldVars mems
+            c' = if null mems then c else bindVars fieldBindings c
+         in collectLocals c' innerBody
+      ctxFromCases = foldr collectCase ctx (EC.mapToList cases)
+   in case defaultCase of
+        Just defBody -> collectLocals ctxFromCases defBody
+        Nothing -> ctxFromCases
+collectLocals ctx (TMatch _ (MatchRequest abilityBranches pureCase)) =
+  -- Collect from pure case and all ability branches
+  let collectAbility (_ref, tagCases) c =
+        foldr (\(_, (mems, body)) c' ->
+          let (fieldVars, innerBody) = extractAbsVars body
+              fieldBindings = zip fieldVars mems
+              c'' = if null mems then c' else bindVars fieldBindings c'
+           in collectLocals c'' innerBody) c (EC.mapToList tagCases)
+      ctxFromBranches = foldr collectAbility ctx abilityBranches
+   in collectLocals ctxFromBranches pureCase
 -- THnd: collect from the handler body
 collectLocals ctx (THnd _refs _handlerVar _affineHandler body) =
   collectLocals ctx body
@@ -1922,7 +1998,9 @@ compilePrimOp op _n = Left $ UnsupportedPrimOp op
 builtinToPrimOp :: Text -> Int -> Maybe [WatInstr]
 -- Nat operations (the ## prefix is stripped by the parser)
 builtinToPrimOp "Nat.+" 2 = Just [I64Add]
+builtinToPrimOp "Nat.-" 2 = Just [I64Sub]  -- Also handle Nat.- alias
 builtinToPrimOp "Nat.sub" 2 = Just [I64Sub]
+builtinToPrimOp "Nat.drop" 2 = Just [I64Sub]  -- Saturating sub (TODO: should clamp to 0)
 builtinToPrimOp "Nat.*" 2 = Just [I64Mul]
 builtinToPrimOp "Nat./" 2 = Just [I64DivU]
 builtinToPrimOp "Nat.mod" 2 = Just [I64RemU]

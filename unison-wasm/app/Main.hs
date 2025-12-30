@@ -3,33 +3,36 @@
 -- This executable compiles Unison code to WAT (WebAssembly Text format).
 --
 -- Usage:
---   unison-wasm-poc compile <name> <code>   -- Compile Unison code to WAT
---   unison-wasm-poc compile-file <name> <file> -- Compile .u file to WAT
---   unison-wasm-poc types <name>            -- Generate TypeScript definitions
---   unison-wasm-poc debug <code>            -- Show parsed SuperGroup structure
+--   unison-wasm-poc compile <name> <code>        -- Compile inline Unison code to WAT
+--   unison-wasm-poc compile-codebase --codebase <path> --project <proj> --branch <branch> <term>
+--                                                -- Compile from a .unison codebase
+--   unison-wasm-poc types <name>                 -- Generate TypeScript definitions
+--   unison-wasm-poc debug <code>                 -- Show parsed SuperGroup structure
 module Main where
 
-import Data.Functor.Identity (Identity, runIdentity)
+import Data.Text qualified as Text
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
 import Unison.Builtin qualified as B
 import Unison.Parser.Ann (Ann)
+import Unison.Prelude
 import Unison.Reference (Reference)
 import Unison.Runtime.ANF
   ( SuperGroup,
     lamLift,
     superNormalize,
   )
-import Unison.Runtime.Pattern (splitPatterns, builtinDataSpec)
+import Unison.Runtime.Pattern (builtinDataSpec, splitPatterns)
 import Unison.Symbol (Symbol)
 import Unison.Syntax.Parser qualified as Parser
 import Unison.Syntax.TermParser qualified as TermParser
-import Unison.Term qualified as Unison.Term
 import Unison.Term (unannotate)
+import Unison.Term qualified as Unison.Term
+import Unison.Wasm.Codebase (compileFromCodebasePath, compileMultipleFromCodebasePath)
 import Unison.Wasm.Compile (compileGroupWithLifted)
 import Unison.Wasm.Emit (emitModule)
-import Unison.Wasm.TypeScript (generateDtsFromExports, TsType (..))
+import Unison.Wasm.TypeScript (TsType (..), generateDtsFromExports)
 
 -- | Parsing environment with builtin names
 parsingEnv :: Parser.ParsingEnv Identity
@@ -82,24 +85,54 @@ main = do
           putStrLn "\n=== Lifted Combinators ==="
           mapM_ (\(ref, lsg) -> putStrLn (show ref) >> print lsg >> putStrLn "") ctx
     ["compile", name, code] -> do
-      -- Parse actual Unison code and compile to WAT
+      -- Parse inline Unison code and compile to WAT
       -- Uses the full pipeline: parse → lamLift → superNormalize → compile
       compileCode name code
-    ["compile-file", name, filePath] -> do
-      -- Read code from a .u file and compile to WAT
-      code <- readFile filePath
-      compileCode name code
+    -- compile-codebase: Full codebase integration
+    -- Usage: compile-codebase --codebase <path> --project <proj> --branch <branch> <term> [term2 ...]
+    ("compile-codebase" : rest) -> do
+      case parseCodebaseArgs rest of
+        Left err -> do
+          hPutStrLn stderr $ "Error: " ++ err
+          hPutStrLn stderr ""
+          hPutStrLn stderr "Usage: compile-codebase --codebase <path> --project <proj> --branch <branch> <term> [term2 ...]"
+          exitFailure
+        Right (cbPath, projName, branchName, termNames) ->
+          case termNames of
+            [termName] -> do
+              -- Single term: use existing function
+              result <- compileFromCodebasePath
+                cbPath
+                (Text.pack projName)
+                (Text.pack branchName)
+                (Text.pack termName)
+                (Text.pack termName)  -- export name = term name
+              case result of
+                Left err -> do
+                  hPutStrLn stderr $ "Compilation error: " ++ show err
+                  exitFailure
+                Right wasm -> putStr (emitModule wasm)
+            _ -> do
+              -- Multiple terms: use multi-entry function
+              let termPairs = [(Text.pack t, Text.pack t) | t <- termNames]
+              result <- compileMultipleFromCodebasePath
+                cbPath
+                (Text.pack projName)
+                (Text.pack branchName)
+                termPairs
+              case result of
+                Left err -> do
+                  hPutStrLn stderr $ "Compilation error: " ++ show err
+                  exitFailure
+                Right wasm -> putStr (emitModule wasm)
     ["types", name] -> do
       -- Generate TypeScript type definitions for a compiled module
-      -- Currently generates a template with common exports; real implementation
-      -- would extract types from the compiled module.
       let dts = generateDtsFromExports name
             [ (name, [TsBigInt], TsBigInt)  -- Default: assumes Nat -> Nat
             ]
       putStr dts
     ["types", name, argType, retType] -> do
       -- Generate TypeScript definitions with explicit types
-      -- types <name> <argType> <retType>
       let argTs = parseTypeArg argType
           retTs = parseTypeArg retType
           dts = generateDtsFromExports name [(name, [argTs], retTs)]
@@ -135,23 +168,39 @@ parseTypeArg "Boolean" = TsBoolean
 parseTypeArg "Unit" = TsVoid
 parseTypeArg name = TsNamed name
 
+-- | Parse compile-codebase command arguments
+-- Returns: (codebasePath, projectName, branchName, termNames)
+parseCodebaseArgs :: [String] -> Either String (FilePath, String, String, [String])
+parseCodebaseArgs args = go Nothing Nothing Nothing args
+  where
+    go :: Maybe FilePath -> Maybe String -> Maybe String -> [String] -> Either String (FilePath, String, String, [String])
+    go _mcb mproj mbranch ("--codebase" : path : rest) = go (Just path) mproj mbranch rest
+    go mcb _mproj mbranch ("--project" : proj : rest) = go mcb (Just proj) mbranch rest
+    go mcb mproj _mbranch ("--branch" : branch : rest) = go mcb mproj (Just branch) rest
+    go (Just cb) (Just proj) (Just branch) terms | not (null terms) =
+      Right (cb, proj, branch, terms)
+    go Nothing _ _ _ = Left "Missing --codebase <path>"
+    go _ Nothing _ _ = Left "Missing --project <name>"
+    go _ _ Nothing _ = Left "Missing --branch <name>"
+    go _ _ _ [] = Left "Missing term name(s)"
+    go _ _ _ _ = Left "Unrecognized option"
+
 usage :: IO ()
 usage = do
   hPutStrLn stderr "Usage: unison-wasm-poc <command>"
   hPutStrLn stderr ""
   hPutStrLn stderr "Commands:"
-  hPutStrLn stderr "  compile <name> <code>           Compile Unison code to WAT"
-  hPutStrLn stderr "  compile-file <name> <file>      Compile .u file to WAT"
-  hPutStrLn stderr "  types <name>                    Generate TypeScript .d.ts (default: Nat -> Nat)"
-  hPutStrLn stderr "  types <name> <arg> <ret>        Generate .d.ts with explicit types"
-  hPutStrLn stderr "  debug <code>                    Show parsed SuperGroup structure"
+  hPutStrLn stderr "  compile <name> <code>               Compile inline Unison code to WAT"
+  hPutStrLn stderr "  compile-codebase --codebase <path> --project <proj> --branch <branch> <term> [term2 ...]"
+  hPutStrLn stderr "                                      Compile term(s) from a .unison codebase"
+  hPutStrLn stderr "  types <name>                        Generate TypeScript .d.ts (default: Nat -> Nat)"
+  hPutStrLn stderr "  types <name> <arg> <ret>            Generate .d.ts with explicit types"
+  hPutStrLn stderr "  debug <code>                        Show parsed SuperGroup structure"
   hPutStrLn stderr ""
   hPutStrLn stderr "Supported types for 'types' command: Nat, Int, Float, Text, Boolean, Unit"
   hPutStrLn stderr ""
   hPutStrLn stderr "Examples:"
-  hPutStrLn stderr "  unison-wasm-poc compile increment '##Nat.+ p0 1'"
-  hPutStrLn stderr "  unison-wasm-poc compile-file pricing src/pricing.u"
+  hPutStrLn stderr "  unison-wasm-poc compile increment 'x -> ##Nat.+ x 1'"
+  hPutStrLn stderr "  unison-wasm-poc compile-codebase --codebase .unison --project demo --branch main calculateSubtotal"
   hPutStrLn stderr "  unison-wasm-poc types factorial"
   hPutStrLn stderr "  unison-wasm-poc types greet Text Text"
-  hPutStrLn stderr "  unison-wasm-poc compile factorial \\"
-  hPutStrLn stderr "    'let go n = match n with 0 -> 1; _ -> ##Nat.* n (go (##Nat.sub n 1)); go 5'"

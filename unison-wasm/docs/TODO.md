@@ -22,31 +22,7 @@ The current implementation (v0.1.0) is a **proof of concept**. It demonstrates t
 
 | Item | Current State | Required |
 |------|---------------|----------|
-| **Codebase-aware compilation** | CLI takes inline strings | Compile by looking up terms in codebase |
-| **Multi-function modules** | Each compile = 1 function | Compile term with all dependencies |
-| **Direct .u compilation** | Demo uses handwritten WAT | Compile `pricing.u` without fallback |
 | **Browser foreign handlers** | Only `IO.printNat` | Handlers for `IO_delay`, stdout, + DOM/Events abilities |
-
-### v1.0 Implementation Outline
-
-1. **Codebase integration**
-   - Add `Unison.Wasm.Codebase` module
-   - Look up term by name/hash in codebase
-   - Resolve all transitive dependencies
-   - Compile dependency graph to single WASM module
-
-2. **Multi-function emission**
-   - Modify `Emit.hs` to output multiple functions
-   - Generate function table for indirect calls
-   - Handle cross-function references
-
-3. **Remove demo fallback**
-   - Update `build-wasm.sh` to compile `pricing.u` directly
-   - Delete handwritten WAT reference implementation
-
-4. **Browser foreign function handlers**
-   - Provide browser-compatible implementations of Unison's existing foreign functions
-   - Map existing abilities to browser APIs (not inventing new abilities)
 
 ### Browser Foreign Function Handlers
 

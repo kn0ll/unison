@@ -19,12 +19,11 @@ const __dirname = dirname(__filename);
 const app = express();
 const PORT = parseInt(process.env.PORT || '3001');
 
-// WASM module interface
+// WASM module interface - all pricing functions compiled from Unison
 interface WasmExports {
   calculatePrice: (qty: bigint) => bigint;
   calculateDiscount: (qty: bigint) => bigint;
   calculateSubtotal: (qty: bigint) => bigint;
-  calculatePriceWithLog: (qty: bigint) => bigint;
 }
 
 let wasmExports: WasmExports | null = null;
@@ -105,11 +104,10 @@ app.get('/api/price', (req, res) => {
     return;
   }
 
-  // Use calculatePriceWithLog to demonstrate foreign calls (IO.printNat)
-  // This will log to the server console - same as browser console.log!
-  const price = Number(wasmExports.calculatePriceWithLog(BigInt(qty)));
-  const discount = Number(wasmExports.calculateDiscount(BigInt(qty)));
+  // Call all pricing functions from WASM - compiled from Unison
   const subtotal = Number(wasmExports.calculateSubtotal(BigInt(qty)));
+  const discount = Number(wasmExports.calculateDiscount(BigInt(qty)));
+  const price = Number(wasmExports.calculatePrice(BigInt(qty)));
 
   res.json({
     quantity: qty,

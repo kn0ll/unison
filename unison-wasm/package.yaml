@@ -14,11 +14,16 @@ library:
     - base
     - bytestring
     - containers
+    - mtl
     - text
+    - unison-codebase-sqlite   # For U.Codebase.Sqlite.Queries (project/branch lookup)
+    - unison-core              # For Unison.Core.Project (ProjectName, ProjectBranchName)
+    - unison-core1
     - unison-hash
     - unison-parser-typechecker
+    - unison-prelude
     - unison-runtime
-    - unison-core1
+    - unison-syntax
 
 executables:
   unison-wasm-poc:
@@ -30,8 +35,10 @@ executables:
         other-modules: Paths_unison_wasm
     dependencies:
       - base
+      - text
       - unison-core1
       - unison-parser-typechecker
+      - unison-prelude
       - unison-runtime
       - unison-syntax
       - unison-wasm

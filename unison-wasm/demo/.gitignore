@@ -1,0 +1,12 @@
+# Generated codebase (created by build-wasm.sh)
+.unison/
+
+# Build outputs
+dist/
+
+# UCM transcript outputs
+*.output.md
+
+# Node
+node_modules/
+

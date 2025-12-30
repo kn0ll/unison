@@ -35,17 +35,3 @@ calculateSubtotal quantity = quantity * 1000
 hasBulkDiscount : Nat -> Boolean
 hasBulkDiscount quantity = quantity >= 5
 
--- Calculate price and log the result
--- This demonstrates foreign calls (IO abilities) working in WASM
--- The same IO.printNat call works in:
---   - Browser: calls console.log via JS host
---   - Server: calls console.log via Node.js
---
--- @param quantity Number of items
--- @returns Total price in cents (also logged)
-calculatePriceWithLog : Nat ->{IO} Nat
-calculatePriceWithLog quantity =
-  price = calculatePrice quantity
-  printLine (Nat.toText price)  -- Foreign call: logs to console
-  price
-

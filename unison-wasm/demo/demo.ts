@@ -9,11 +9,11 @@
  * frontend and backend have different implementations.
  */
 
+// WASM module interface - all pricing functions compiled from Unison
 interface WasmExports {
   calculatePrice: (qty: bigint) => bigint;
   calculateDiscount: (qty: bigint) => bigint;
   calculateSubtotal: (qty: bigint) => bigint;
-  calculatePriceWithLog: (qty: bigint) => bigint;
   memory: WebAssembly.Memory;
 }
 
@@ -160,12 +160,10 @@ function formatCentsForLog(cents: number): string {
 function updatePrice(): void {
   const qty = BigInt(qtySlider.value);
 
-  // Call WASM functions
+  // Call all WASM functions - compiled from Unison
   const subtotal = Number(runtime.call('calculateSubtotal', qty));
   const discount = Number(runtime.call('calculateDiscount', qty));
-  // Use calculatePriceWithLog to demonstrate foreign calls (IO.printNat)
-  // This logs to browser console AND would log to server console if called there
-  const total = Number(runtime.call('calculatePriceWithLog', qty));
+  const total = Number(runtime.call('calculatePrice', qty));
 
   // Update UI
   qtyDisplay.textContent = qtySlider.value;

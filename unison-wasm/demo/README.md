@@ -134,7 +134,8 @@ GET /api/health
 - Node.js 18+
 - npm
 - `wabt` package for WASM compilation: `sudo apt-get install wabt`
-- (Optional) Unison WASM compiler for compiling `.u` files
+- Unison CLI (`unison`) for creating the codebase
+- Stack (for building `unison-wasm-poc`)
 
 ### Build Process
 
@@ -142,7 +143,8 @@ GET /api/health
 # 1. Build WASM from Unison code
 npm run build:wasm
 # This runs build-wasm.sh which:
-#   - Generates pricing.wat (reference implementation)
+#   - Creates a .unison codebase from src/pricing.u (via UCM transcript)
+#   - Compiles all pricing functions using compile-codebase
 #   - Converts to pricing.wasm using wat2wasm
 
 # 2. Build TypeScript
