@@ -12,6 +12,7 @@ import {
   TEXT_BYTES_OFFSET,
   FOREIGN_HANDLE_OFFSET,
   OBJ_PAP,
+  OBJ_DATAG,
   TYPE_NAT,
   TYPE_INT,
   TYPE_FLOAT,
@@ -26,6 +27,7 @@ import {
   HEADER_OBJTAG_MASK,
   OBJ_TAG_NAMES,
   YIELD_SENTINEL,
+  MEMORY_HEAP_START,
   type Ptr32,
   type TypeTag,
   type ObjTag,
@@ -200,7 +202,7 @@ export class UnisonRuntime {
   private pendingContinuations: Map<bigint, ContinuationHandle> = new Map();
 
   /** Promise resolve callback for current run() */
-  private resolveRun: ((value: bigint) => void) | null = null;
+  private resolveRun: ((value: bigint | bigint[]) => void) | null = null;
 
   /** Promise reject callback for current run() */
   private rejectRun: ((error: Error) => void) | null = null;
@@ -455,11 +457,11 @@ export class UnisonRuntime {
           this.asyncState = AsyncState.Yielded;
           // Don't resolve yet - wait for resume
         } else {
-          // Sync completion
+          // Sync completion - parse DataG records into tuples
           this.asyncState = AsyncState.Idle;
           this.resolveRun = null;
           this.rejectRun = null;
-          resolve(resultBigInt);
+          resolve(this.parseResult(resultBigInt));
         }
       } catch (error) {
         this.asyncState = AsyncState.Idle;
@@ -539,10 +541,10 @@ export class UnisonRuntime {
         // Yielded again (sequential async)
         this.asyncState = AsyncState.Yielded;
       } else {
-        // Final result
+        // Final result - parse DataG records into tuples
         this.asyncState = AsyncState.Idle;
         if (this.resolveRun) {
-          this.resolveRun(resultBigInt);
+          this.resolveRun(this.parseResult(resultBigInt));
           this.resolveRun = null;
           this.rejectRun = null;
         }
@@ -616,10 +618,10 @@ export class UnisonRuntime {
         // Yielded again
         this.asyncState = AsyncState.Yielded;
       } else {
-        // Final result (with error wrapped in Left)
+        // Final result (with error wrapped in Left) - parse DataG records into tuples
         this.asyncState = AsyncState.Idle;
         if (this.resolveRun) {
-          this.resolveRun(resultBigInt);
+          this.resolveRun(this.parseResult(resultBigInt));
           this.resolveRun = null;
           this.rejectRun = null;
         }
@@ -750,6 +752,40 @@ export class UnisonRuntime {
     }
 
     return fields;
+  }
+
+  /**
+   * Check if a value looks like a heap pointer.
+   */
+  private isHeapPointer(value: bigint): boolean {
+    const ptr = Number(value);
+    return ptr >= MEMORY_HEAP_START && ptr < 0x10000000; // Reasonable heap range
+  }
+
+  /**
+   * Check if a pointer points to a DataG object.
+   * DataG uses a 32-bit header: (ObjTag << 20) | arity
+   */
+  private isDataG(ptr: Ptr32): boolean {
+    try {
+      const view = this.getMemoryView();
+      const header = view.getUint32(ptr, true);
+      const objTag = (header >> 20) & 0xFFF; // ObjTag is in bits 20-31
+      return objTag === OBJ_DATAG;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Parse a result value. If it's a DataG, return its fields as a tuple.
+   * Otherwise, return the raw bigint.
+   */
+  parseResult(value: bigint): bigint | bigint[] {
+    if (this.isHeapPointer(value) && this.isDataG(Number(value))) {
+      return this.readDataGFields(Number(value));
+    }
+    return value;
   }
 
   /**
