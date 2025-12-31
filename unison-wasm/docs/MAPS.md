@@ -47,18 +47,18 @@ interface MapNode<K, V> {
 function readMap<K, V>(ptr: number): Map<K, V> {
   const node = runtime.readDataGFields(ptr);
   const ctorTag = runtime.getCtorTag(ptr);
-  
+
   if (ctorTag === 0) return new Map(); // Empty
-  
+
   // Node constructor
   const [leftPtr, key, value, rightPtr] = node;
   const result = new Map<K, V>();
-  
+
   // Recursively read subtrees
   readMapInto(result, leftPtr);
   result.set(parseKey(key), parseValue(value));
   readMapInto(result, rightPtr);
-  
+
   return result;
 }
 ```
@@ -75,7 +75,7 @@ In Unison, convert Map to list before returning:
 ```unison
 -- Return a list of key-value pairs
 getPrices : '{IO} [(Text, Nat)]
-getPrices _ = 
+getPrices _ =
   prices
     |> Map.toList
 ```
@@ -141,21 +141,21 @@ function readPriceMap(ptr: number): Record<string, number> {
 function readListAsObject(ptr: number): Record<string, number> {
   const result: Record<string, number> = {};
   let current = ptr;
-  
+
   while (true) {
     const ctorTag = runtime.getCtorTag(current);
     if (ctorTag === 0) break; // Nil
-    
+
     // Cons (k, v) tail
     const [pairPtr, tailPtr] = runtime.readDataGFields(current);
     const [keyPtr, value] = runtime.readDataGFields(Number(pairPtr));
-    
+
     const key = runtime.getText(Number(keyPtr));
     result[key] = Number(value);
-    
+
     current = Number(tailPtr);
   }
-  
+
   return result;
 }
 ```
@@ -188,12 +188,12 @@ For performance-critical cases, support direct tree reading:
 ```typescript
 class UnisonMap<K, V> {
   private root: number; // Pointer to WASM heap
-  
+
   get(key: K): V | undefined {
     // Binary search in WASM memory directly
     // No full tree copy needed
   }
-  
+
   toJS(): Map<K, V> {
     // Full conversion when needed
   }
@@ -211,7 +211,7 @@ interface UnisonRuntime {
   // Existing
   readDataGFields(ptr: number): bigint[];
   getCtorTag(ptr: number): number;
-  
+
   // New for Maps
   readList<T>(ptr: number, parseElem: (ptr: number) => T): T[];
   readMap<K, V>(ptr: number, parseKey: ..., parseValue: ...): Map<K, V>;

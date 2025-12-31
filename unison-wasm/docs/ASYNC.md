@@ -1,576 +1,323 @@
-# Async FFI — Design & Implementation Strategy
+# Async FFI Architecture
 
-**Version:** 0.2.0
-**Status:** Phase 2 Complete (Local State Saving)
-
-This document defines the strategy for implementing true async/await semantics for Unison WASM FFI calls. It covers the current state, target design, implementation phases, and strict exit criteria.
+Unison WASM supports async foreign function calls through **delimited continuations**. When a JavaScript FFI function yields (e.g., `IO.delay`), WASM suspends, saves state, and resumes later.
 
 ---
 
-## Table of Contents
+## Overview
 
-1. [Executive Summary](#executive-summary)
-2. [Current State](#current-state)
-3. [Target Design](#target-design)
-4. [Implementation Phases](#implementation-phases)
-5. [Appendices](#appendices)
+```
+Unison                      WASM                         JavaScript
+───────                     ────                         ──────────
+IO.delay 1000  ────────►   call $IO_delay_impl_v3  ───►  setTimeout(1000ms)
+                                                         return YIELD_SENTINEL
+                           check: is YIELD_SENTINEL?
+                           yes → save state, return
+                                                         ...1 second later...
+                           ◄── __resume(contId, 0n) ◄──  callback fires
+                           restore state
+                           continue execution
+```
 
 ---
 
-## Executive Summary
+## Key Concepts
 
-### The Problem
+### YIELD_SENTINEL
 
-Unison WASM can call JavaScript FFI functions, but cannot **yield** and **resume** for async operations. When `IO.delay` calls `setTimeout`, WASM continues executing immediately instead of waiting.
+A magic value (`-2n` / `0xFFFFFFFFFFFFFFFE`) that signals async yield:
 
-### The Root Cause
+```typescript
+// JS returns this to indicate "I'm not done yet"
+return YIELD_SENTINEL;
+```
 
-The Haskell compiler emits a simple `Call` instruction for `TFOp`:
+When WASM receives this value from an FFI call, it knows to suspend.
+
+### AsyncCont Object
+
+A heap-allocated structure storing the suspended computation's state:
+
+| Offset | Field | Description |
+|--------|-------|-------------|
+| 0-7 | Header | ObjTag (0x00B) + size |
+| 8-15 | cont_id | Unique ID for JS reference |
+| 16-19 | k_ptr | Saved K-stack pointer |
+| 20-23 | denv_ptr | Saved dynamic environment |
+| 24-27 | locals_ptr | Pointer to saved locals array |
+| 28-31 | locals_count | Number of saved locals |
+| 32-35 | func_idx | Function table index (for call_indirect) |
+| 36-39 | resume_label | Yield point ID (for br_table) |
+| 40-43 | status | 0=Pending, 1=Resumed, 2=Freed, 3=Error |
+| 44-47 | arity | Function arity (for call_indirect type) |
+
+### State Machine Transformation
+
+Functions with yield points are transformed into state machines:
 
 ```wat
-call $IO_delay_impl_v3    ;; FFI returns YIELD_SENTINEL (0xFFFFFFFFFFFFFFFE)
-local.set $p5             ;; ← WASM stores it as normal value and continues!
-call $Debug_trace         ;; ← Executes immediately, doesn't wait
-```
-
-The compiler must instead:
-1. Check if the return value is `YIELD_SENTINEL`
-2. If yes: save locals, return `YIELD_SENTINEL` to propagate yield
-3. If no: continue normal execution
-4. Provide a resume point for `__resume` to jump to
-
-### The Solution
-
-Implement **delimited continuations at the WASM level** for async FFI calls. This mirrors how `TShift`/`TKon` handle Unison abilities, but integrated with the JavaScript event loop.
-
----
-
-## Current State
-
-### What Works ✅
-
-| Component | Status | Evidence |
-|-----------|--------|----------|
-| Sync FFI calls | ✅ Working | `Debug.trace` logs in browser/Node |
-| FFI import generation | ✅ Working | Compiler emits `(import "ffi" ...)` |
-| Yield sentinel constant | ✅ Defined | `YIELD_SENTINEL = 0xFFFFFFFFFFFFFFFE` |
-| `AsyncState` enum | ✅ Implemented | `Idle`, `Yielded`, `Resuming` |
-| `ContinuationHandle` class | ✅ Implemented | Exactly-once enforcement |
-| `__resume` export | ✅ Stub exists | Validates cont_id, returns value |
-| `__alloc_async_cont` | ✅ Implemented | Allocates 40-byte AsyncCont with locals |
-| Nested async guard | ✅ Implemented | `NestedAsyncError` thrown |
-| Yield checking | ✅ Phase 1 | Compiler checks for `YIELD_SENTINEL` |
-| Local saving | ✅ Phase 2 | Compiler emits local-saving code |
-| `func_idx` + `resume_label` | ✅ Phase 2 | Stored in AsyncCont object |
-
-### What's Broken ❌
-
-| Component | Status | Issue |
-|-----------|--------|-------|
-| Resume dispatch | ❌ Missing | `__resume` doesn't jump to resume point |
-| Local restoring | ❌ Missing | Saved locals not restored on resume |
-| K-stack integration | ❌ Missing | Async yield doesn't push K frame |
-| `__resume` body | ❌ Stub only | Doesn't restore state or dispatch |
-
-### Current Code Path
-
-```
-Unison Code           Compiler                    WASM                    JS
-───────────           ─────────                   ────                    ──
-IO.delay 1000   →     TFOp ForeignDelay args  →   call $IO_delay   →   setTimeout(...)
-                                                                         return YIELD_SENTINEL
-                                                  local.set $result   ← (stored as i64!)
-                                                  ;; continues immediately!
-```
-
-### Why This Happens
-
-In `Compile.hs`:
-
-```haskell
-compileANormal ctx (TFOp foreignFunc args) = do
-  argInstrs <- concat <$> mapM (compileANormal ctx . TVar) args
-  let funcName = foreignFuncToImportName foreignFunc
-  pure $ argInstrs ++ [Call funcName]  -- ← Just calls and continues!
-```
-
-Compare to `TShift` which does capture locals and walk the K-stack.
-
----
-
-## Target Design
-
-### Design Principles
-
-1. **Reuse ability machinery**: Async yield/resume should use the same K-stack and Captured objects as `TShift`/`TKon`
-2. **Minimize magic**: No hidden state machines in WASM—all state is explicit in AsyncCont and K
-3. **Single mechanism**: All FFI calls (sync and async) use the same code path; sync is just async with immediate resume
-4. **Fail-fast**: Invalid states cause immediate traps, not silent corruption
-
-### Target Code Path
-
-```
-Unison Code           Compiler                    WASM                    JS
-───────────           ─────────                   ────                    ──
-IO.delay 1000   →     TFOp ForeignDelay args  →   call $IO_delay   →   setTimeout(...)
-                                                                         return YIELD_SENTINEL
-                                                  ;; YIELD CHECK:
-                                                  local.tee $result
-                                                  i64.const YIELD_SENTINEL
-                                                  i64.eq
-                                                  if
-                                                    ;; Save all locals to AsyncCont
-                                                    call $__save_async_state
-                                                    ;; Record resume label
-                                                    i32.const LABEL_42
-                                                    global.set $async_resume_label
-                                                    ;; Propagate yield
-                                                    i64.const YIELD_SENTINEL
-                                                    return
-                                                  end
-                                              ◄── LABEL_42: (resume point)
-                                                  ;; Continue with $result
-                                                  ...
-
-                                                                   ...timeout fires...
-
-                                              ◄── call $__resume(cont_id, value)
-                                                  ;; Restore locals from AsyncCont
-                                                  call $__restore_async_state
-                                                  ;; Jump to resume label
-                                                  global.get $async_resume_label
-                                                  br_table [LABEL_42, ...]
-```
-
-### Async Protocol (Detailed)
-
-#### Step 1: FFI Call + Yield Check
-
-After every potentially-async FFI call, emit:
-
-```wat
-(local.tee $__ffi_result)
-(i64.const 0xFFFFFFFFFFFFFFFE)  ;; YIELD_SENTINEL
-(i64.eq)
-(if
-  ;; === YIELD PATH ===
-  (then
-    ;; 1. Save locals count
-    (i32.const <num_locals>)
-    (global.set $__async_locals_count)
-
-    ;; 2. Save each local to linear memory
-    (global.get $__async_locals_ptr)
-    (local.get $p0)
-    (i64.store offset=0)
-    ;; ... repeat for all locals ...
-
-    ;; 3. Save K stack pointer
-    (global.get $k_ptr)
-    (global.set $__async_k_ptr)
-
-    ;; 4. Set resume label (unique per yield point)
-    (i32.const YIELD_POINT_ID)
-    (global.set $__async_resume_label)
-
-    ;; 5. Return YIELD_SENTINEL to caller
-    (i64.const 0xFFFFFFFFFFFFFFFE)
-    (return))
-  ;; === NORMAL PATH ===
-  (else
-    ;; Continue with result in $__ffi_result
-    (nop)))
-```
-
-#### Step 2: Resume Entry Point
-
-Each function with yield points needs a resume dispatcher at the top:
-
-```wat
-(func $fn_with_async (param ...) (result i64)
-  ;; Check if this is a resume call
+(func $calculatePrice (param $p0 i64) (param $p1 i64) (result i64)
+  ;; Resume dispatcher at entry
   (global.get $__async_resuming)
-  (if (result i64)
+  (if
     (then
-      ;; Clear resuming flag
-      (i32.const 0)
-      (global.set $__async_resuming)
-
-      ;; Restore all locals from saved state
-      (global.get $__async_locals_ptr)
-      (i64.load offset=0)
-      (local.set $p0)
-      ;; ... repeat for all locals ...
-
-      ;; Restore K
-      (global.get $__async_k_ptr)
-      (global.set $k_ptr)
-
-      ;; Jump to correct resume point
-      (global.get $__async_resume_label)
-      (br_table $yield_0 $yield_1 $yield_2 ...))
+      ;; Restore locals from AsyncCont
+      ;; Jump to saved resume point
+      (br_table $state_0 $state_1 $state_2))
     (else
-      ;; Normal entry - fall through
-      (nop)))
-
-  ;; ... normal function body with yield points ...
-
-  ;; Resume labels are block/loop targets
-  (block $yield_0
-    (block $yield_1
-      ;; Function body
-      (call $IO_delay_impl_v3)
-      ;; Yield check after call
-      ;; If not yielding, continue
-      ;; If yielding, resume label = 0
+      ;; Normal entry: start at state 0
+      (i32.const 0)
+      (local.set $__state)))
+  
+  ;; State machine body
+  (loop $state_loop
+    (block $state_2
+      (block $state_1
+        (block $state_0
+          (br_table $state_0 $state_1 $state_2 $exit)
+        end) ;; state 0
+        ;; Code before yield point
+        (call $IO_delay_impl_v3)
+        ;; Yield check: if YIELD_SENTINEL, save and return
+        ...
+      end) ;; state 1
+      ;; Code after yield point
       ...
-    ) ;; end $yield_1
-    ;; Code after yield point 1
-  ) ;; end $yield_0
-)
+    end) ;; state 2
+    ...
+  end))
 ```
 
-### Data Structures
+---
 
-#### AsyncCont Object (on heap)
+## WASM Exports
 
-```
-┌────────────────────────────────────────┐
-│ Header (64 bits) - ObjTag=0x00B        │  ← bytes 0-7
-├────────────────────────────────────────┤
-│ ContId (64 bits)                       │  ← bytes 8-15
-├────────────────────────────────────────┤
-│ KPtr (32) │ ResumeLabel (32)           │  ← bytes 16-23
-├────────────────────────────────────────┤
-│ LocalsCount (32) │ Status (32)         │  ← bytes 24-31
-├────────────────────────────────────────┤
-│ FuncRef (32) │ Reserved (32)           │  ← bytes 32-39  [NEW]
-├────────────────────────────────────────┤
-│ Locals[0..N-1] (64 bits each)          │  ← bytes 40+
-└────────────────────────────────────────┘
-```
+### `__resume(cont_id: i64, value: i64) -> i64`
 
-| Field | Description |
-|-------|-------------|
-| `ContId` | Unique ID for JS-side `ContinuationHandle` |
-| `KPtr` | Saved K stack pointer |
-| `ResumeLabel` | Which yield point to resume (index into br_table) |
-| `LocalsCount` | Number of saved locals |
-| `Status` | `0=Pending`, `1=Resumed`, `2=Freed` |
-| `FuncRef` | Table index of the suspended function |
-| `Locals[]` | Saved local variables |
+Resume a suspended computation with a value:
 
-#### Global Variables
+1. Validates `cont_id` matches `async_cont_ptr`
+2. Checks status is `Pending` (0)
+3. Sets status to `Resumed` (1)
+4. Loads saved state into globals
+5. Sets `__async_resuming = 1`
+6. Calls the suspended function via `call_indirect`
+
+### `__resume_with_error(cont_id: i64, failure_ptr: i64) -> i64`
+
+Resume a suspended computation with an error:
+
+1. Same validation as `__resume`
+2. Sets status to `Error` (3)
+3. Wraps `failure_ptr` in `Left` constructor
+4. Sets resume value to the `Left Failure` object
+5. Calls the suspended function
+
+---
+
+## WASM Globals
 
 ```wat
-;; Existing
-(global $async_cont_id (mut i64) (i64.const 0))
-(global $async_cont_ptr (mut i32) (i32.const 0))
-
-;; New
-(global $__async_resuming (mut i32) (i32.const 0))     ;; 1 if entering via resume
-(global $__async_resume_label (mut i32) (i32.const 0)) ;; Which yield point
-(global $__async_locals_ptr (mut i32) (i32.const 0))   ;; Pointer to locals array
-(global $__async_locals_count (mut i32) (i32.const 0)) ;; How many locals saved
-(global $__async_k_ptr (mut i32) (i32.const 0))        ;; Saved K
-(global $__async_func_idx (mut i32) (i32.const 0))     ;; Suspended function
-```
-
-### `__resume` Implementation
-
-```wat
-(func $__resume (param $cont_id i64) (param $value i64) (result i64)
-  (local $cont_ptr i32)
-  (local $func_idx i32)
-
-  ;; 1. Validate continuation ID
-  (global.get $async_cont_ptr)
-  (local.set $cont_ptr)
-
-  (local.get $cont_ptr)
-  (i64.load offset=8)  ;; Load stored cont_id
-  (local.get $cont_id)
-  (i64.ne)
-  (if (then (unreachable)))  ;; Invalid continuation
-
-  ;; 2. Check status is Pending (0)
-  (local.get $cont_ptr)
-  (i32.load offset=28)
-  (if (then (unreachable)))  ;; Already resumed/freed
-
-  ;; 3. Mark as Resumed
-  (local.get $cont_ptr)
-  (i32.const 1)
-  (i32.store offset=28)
-
-  ;; 4. Load saved state into globals
-  (local.get $cont_ptr)
-  (i32.load offset=16)
-  (global.set $__async_k_ptr)
-
-  (local.get $cont_ptr)
-  (i32.load offset=20)
-  (global.set $__async_resume_label)
-
-  (local.get $cont_ptr)
-  (i32.load offset=24)
-  (global.set $__async_locals_count)
-
-  (local.get $cont_ptr)
-  (i32.const 40)  ;; offset of Locals array
-  (i32.add)
-  (global.set $__async_locals_ptr)
-
-  ;; 5. Set resuming flag
-  (i32.const 1)
-  (global.set $__async_resuming)
-
-  ;; 6. Load function index and call via indirect
-  (local.get $cont_ptr)
-  (i32.load offset=32)
-  (local.set $func_idx)
-
-  ;; 7. Store the resume value somewhere accessible
-  (local.get $value)
-  (global.set $__async_resume_value)
-
-  ;; 8. Call the suspended function (via table)
-  (local.get $func_idx)
-  (call_indirect (result i64))
-)
+(global $async_cont_id (mut i64) (i64.const 0))      ;; Counter for unique IDs
+(global $async_cont_ptr (mut i32) (i32.const 0))     ;; Current AsyncCont pointer
+(global $__async_resuming (mut i32) (i32.const 0))   ;; 1 if resuming
+(global $__async_resume_label (mut i32) (i32.const 0)) ;; Yield point to resume
+(global $__async_resume_value (mut i64) (i64.const 0)) ;; Value from JS
 ```
 
 ---
 
-## Implementation Phases
+## JavaScript Runtime
 
-### Phase 1: Yield Point Infrastructure ✅ COMPLETE
+### UnisonRuntime
 
-**Goal:** Compiler emits yield-checking code after FFI calls.
-
-**Tasks:**
-1. ✅ Add `YieldPointId` counter to `CompileCtx`
-2. ✅ Modify `compileANormal` for `TFOp` to emit yield check
-3. ✅ Add globals: `__async_resuming`, `__async_resume_label`, `__async_resume_value`
-4. ✅ Track which functions have yield points
-
-**Exit Criteria:**
-- [x] WASM checks return value after FFI call
-- [x] `YIELD_SENTINEL` causes `return YIELD_SENTINEL`
-- [x] Sync FFI (`Debug.trace`) still works
-- [x] Unit tests pass (315 Haskell + 117 JS)
-
----
-
-### Phase 2: Local State Saving ✅ COMPLETE
-
-**Goal:** Save all locals when yielding.
-
-**Tasks:**
-1. Count locals at each yield point (`getSaveableLocalCount`) ✅
-2. Allocate locals array in AsyncCont (dynamic size) ✅
-3. Emit local-saving code before `return YIELD_SENTINEL` ✅
-4. Store func_idx and resume_label in AsyncCont ✅
-
-**Implementation Notes:**
-- Changed `compileANormal` to return `([WatInstr], CompileCtx v)` to thread context
-- `allocYieldPoint` assigns unique IDs per function
-- `ffiCallWithYieldCheckFull` emits complete local-saving code
-- AsyncCont now 40 bytes with `func_idx` and `resume_label` fields
-
-**Exit Criteria:**
-- [x] Locals saved to heap on yield
-- [x] AsyncCont object created with correct data
-- [x] JS can read saved locals
-- [x] Unit test: Phase 2 tests in `async.test.ts` pass (119 total tests)
-
----
-
-### Phase 3: Resume Dispatch ✅ COMPLETE
-
-**Goal:** `__resume` can re-enter a function at the correct point.
-
-**Tasks:**
-1. ✅ Emit resume dispatcher at function entry (Async.hs: `resumeDispatcher`)
-2. ✅ Generate `br_table` for resume labels (Async.hs: `stateMachineBody`, `nestedBlocks`)
-3. ✅ Emit local-restoring code (Async.hs: `restoreLocals`)
-4. ✅ Call suspended function via `call_indirect` (Runtime.hs: `resumeFunction`)
-
-**Implementation Notes:**
-- Created `Unison.Wasm.Compile.Async` module for state machine transformation
-- Functions with yield points are transformed via `transformToStateMachine`
-- `YieldPointStart`/`YieldPointEnd` markers in instruction stream identify segments
-- State machine pattern: nested blocks with `br_table` dispatch for O(1) jump
-- `__resume` sets globals (`__async_resuming`, `__async_resume_value`) then calls via `call_indirect`
-
-**Exit Criteria:**
-- [x] `__resume` restores locals (via `restoreLocals` in resume dispatcher)
-- [x] `__resume` jumps to correct yield point (via `br_table` with `__async_resume_label`)
-- [x] Computation continues after resume (state machine loop transitions to next state)
-- [x] Unit tests pass: Phase 3 tests in `async.test.ts` (123 total tests)
-
----
-
-### Phase 4: K-Stack Integration ✅ COMPLETE
-
-**Goal:** Async yield interacts correctly with Unison abilities.
-
-**Tasks:**
-1. ✅ Save K-stack pointer in AsyncCont (already done in Phase 2)
-2. ✅ Restore K-stack on resume (already done in Phase 3)
-3. ✅ Save/restore denv_ptr for handler preservation
-4. ✅ Add arity_0 function type for __resume call_indirect
-5. ✅ Write Phase 4 tests for K-stack and denv preservation
-
-**Implementation Notes:**
-- Extended AsyncCont layout from 40 to 48 bytes to include `denv_ptr` at offset 20
-- Updated offsets: `locals_ptr` → 24, `locals_count` → 28, `func_idx` → 32, `resume_label` → 36, `status` → 40
-- Resume dispatcher now restores both `k_ptr` and `denv_ptr` from AsyncCont
-- Added `arity_0` function type for call_indirect in __resume (no params, returns i64)
-- Updated `__alloc_async_cont` to accept 7 parameters including `denv_ptr`
-
-**Exit Criteria:**
-- [x] K-stack saved/restored across async (verified in Phase 4 tests)
-- [x] DEnv preserved across async (for handler dispatch)
-- [x] Both k_ptr and denv_ptr work together (verified in combined test)
-- [x] Unit tests pass: 315 Haskell + 126 JS
-
----
-
-### Phase 5: Error Handling ✅ COMPLETE
-
-**Goal:** Async failures propagate correctly.
-
-**Tasks:**
-1. ✅ `__resume_with_error` WASM function wraps errors in `Left Failure`
-2. ✅ `resumeWithErrorInternal` in runtime.ts allocates Failure and calls WASM
-3. ✅ `__alloc_data1_raw` for creating Left wrapper at runtime
-4. ✅ Status `ASYNC_STATUS_ERROR (3)` for error-resumed continuations
-5. ✅ ContinuationHandle enforces exactly-once via `consumed` flag
-6. ✅ NestedAsyncError thrown when async starts during Yielded state
-
-**Implementation Notes:**
-- Added `asyncStatusError = 3` to ABI constants
-- Added `__resume_with_error(cont_id, failure_ptr) -> i64` WASM export
-- Added `__alloc_data1_raw(typeRef, ctorTag, field_tag, field_payload) -> i32` for runtime Left allocation
-- Updated `resumeWithErrorInternal` to allocate Failure on heap and call WASM
-- Added `allocFailure` method to UnisonRuntime for creating Failure objects
-- ContinuationHandle.resume() and resumeWithError() both check `consumed` flag
-
-**Exit Criteria:**
-- [x] Async errors become `Failure` values wrapped in `Left`
-- [x] Double-resume throws `ContinuationConsumedError` (verified in tests)
-- [x] Nested async throws `NestedAsyncError` (already implemented)
-- [x] WASM traps on invalid cont_id or double-resume (status check)
-- [x] Unit tests pass: 315 Haskell + 132 JS (6 new Phase 5 tests)
-
----
-
-### Full Feature Complete ✅
-
-All phases done. Final verification:
-
-- [x] Phase 1: Yield Point Infrastructure ✅
-- [x] Phase 2: Local State Saving ✅
-- [x] Phase 3: Resume Dispatch ✅
-- [x] Phase 4: K-Stack Integration ✅
-- [x] Phase 5: Error Handling ✅
-- [ ] Browser demo: pricing with `IO.delay` works (pending integration)
-- [ ] Node demo: same code works (pending integration)
-- [x] TODO.md linked to ASYNC.md
-- [x] FFI.md linked to ASYNC.md
-
----
-
-## Appendices
-
-### A. Comparison: TShift vs Async Yield
-
-| Aspect | TShift (Abilities) | Async Yield (FFI) |
-|--------|-------------------|-------------------|
-| Trigger | `TShift abilityRef contVar body` | `TFOp` returns `YIELD_SENTINEL` |
-| K capture | Walk K to Mark, create Captured | Save K-ptr in AsyncCont |
-| Locals | Save to Captured slots | Save to AsyncCont slots |
-| Resume | `TKon` with continuation | JS calls `__resume` |
-| Resume point | Handler body | `br_table` to yield label |
-
-### B. Alternative: Asyncify
-
-Emscripten's Asyncify is a general-purpose solution that:
-1. Rewinds the entire WASM call stack
-2. Saves all state to linear memory
-3. Resumes by re-calling from the top
-
-**Why not Asyncify?**
-- Requires post-processing of WASM binary
-- Significant code size overhead (~30%)
-- Slower than targeted yield points
-- We already have ability machinery that's similar
-
-### C. Alternative: JSPI (JavaScript Promise Integration)
-
-JSPI is a WebAssembly proposal that:
-1. Allows WASM imports to return Promises
-2. Automatically suspends WASM on Promise await
-3. Resumes when Promise resolves
-
-**Why not JSPI?**
-- It can't do abilities. Unison's delimited continuations (`TShift`/`TKon`) require
-  manual control over the K-stack that JSPI doesn't provide.
-
-### D. Memory Layout for Locals
-
-When saving N locals:
-
-```
-AsyncCont + 40:  local[0] (i64)
-AsyncCont + 48:  local[1] (i64)
-...
-AsyncCont + 40 + 8*(N-1): local[N-1] (i64)
+```typescript
+class UnisonRuntime {
+  // Run a function (handles async yield/resume)
+  async run(funcName: string, ...args: bigint[]): Promise<bigint>;
+  
+  // Register an async FFI handler
+  registerAsyncForeign(
+    name: string,
+    handler: (rt: UnisonRuntime, ...args: bigint[]) => Promise<bigint>
+  ): void;
+}
 ```
 
-Total AsyncCont size: `40 + 8*N` bytes
+### ContinuationHandle
 
-### E. Golden Trace: Async IO.delay
+Represents a suspended computation with exactly-once resumption:
 
+```typescript
+class ContinuationHandle {
+  readonly id: bigint;
+  
+  // Resume with a value (can only call once)
+  resume(value: unknown): void;
+  
+  // Resume with an error (can only call once)
+  resumeWithError(error: Error): void;
+}
 ```
-1.  WASM: TFOp(IO.delay.impl.v3, [1000000])
-2.  WASM: call $IO_delay_impl_v3
-3.  JS:   Handler called with args [1000000n]
-4.  JS:   Allocate contId = 1, setTimeout(1000ms)
-5.  JS:   Return YIELD_SENTINEL to WASM
-6.  WASM: Compare result with YIELD_SENTINEL → equal
-7.  WASM: Save locals[0..4] to heap @ 0x8100
-8.  WASM: Save k_ptr to global $__async_k_ptr
-9.  WASM: Set resume_label = 0
-10. WASM: Return YIELD_SENTINEL
-11. JS:   run() receives YIELD_SENTINEL
-12. JS:   Set asyncState = Yielded
-13. JS:   (wait 1000ms)
-14. JS:   setTimeout callback fires
-15. JS:   handle.resume(0n) called
-16. JS:   __resume(1, 0n) called
-17. WASM: Validate cont_id == 1 ✓
-18. WASM: Mark status = Resumed
-19. WASM: Load locals from 0x8100
-20. WASM: Set __async_resuming = 1
-21. WASM: call_indirect(func_idx)
-22. WASM: Function entry: __async_resuming == 1
-23. WASM: Restore locals from globals
-24. WASM: br_table → $yield_0
-25. WASM: Continue after delay call
-26. WASM: Return final result
-27. JS:   Result received, resolve Promise
+
+### Async Foreign Handler
+
+```typescript
+runtime.registerAsyncForeign('IO.delay.impl.v3', 
+  async (rt, microseconds) => {
+    const ms = Number(microseconds) / 1000;
+    await new Promise(r => setTimeout(r, ms));
+    return 0n; // Unit
+  }
+);
+```
+
+The runtime:
+1. Calls the handler
+2. If handler returns a Promise, waits for it
+3. When resolved, calls `__resume(contId, result)`
+
+---
+
+## Yield/Resume Flow
+
+### Yield Path (WASM → JS)
+
+1. FFI call returns `YIELD_SENTINEL`
+2. WASM detects sentinel value
+3. WASM allocates locals array on heap
+4. WASM saves all locals to the array
+5. WASM creates AsyncCont object with:
+   - `cont_id`: unique identifier
+   - `k_ptr`: current K-stack pointer
+   - `denv_ptr`: current dynamic environment
+   - `locals_ptr`: pointer to saved locals
+   - `func_idx`: current function's table index
+   - `resume_label`: yield point ID + 1
+   - `arity`: function arity
+6. WASM returns `YIELD_SENTINEL` to caller
+7. JS runtime sets state to `Yielded`
+
+### Resume Path (JS → WASM)
+
+1. JS calls `runtime.resumeInternal(contId, value)`
+2. `__resume` validates continuation
+3. `__resume` loads state from AsyncCont
+4. `__resume` sets `__async_resuming = 1`
+5. `__resume` sets `__async_resume_value = value`
+6. `__resume` calls function via `call_indirect`
+7. Function entry detects `__async_resuming`
+8. Resume dispatcher restores locals
+9. `br_table` jumps to saved resume label
+10. Execution continues after the yield point
+
+---
+
+## Error Handling
+
+### Async Errors
+
+When an async operation fails, JS calls `resumeWithError`:
+
+```typescript
+try {
+  const result = await fetchData();
+  handle.resume(result);
+} catch (e) {
+  handle.resumeWithError(e);
+}
+```
+
+This creates a Unison `Left Failure` value on the heap.
+
+### Exactly-Once Semantics
+
+`ContinuationHandle` enforces single use:
+
+```typescript
+handle.resume(value);
+handle.resume(value); // Throws ContinuationConsumedError
+```
+
+### Nested Async
+
+Starting an async operation while one is already yielded throws:
+
+```typescript
+// First async yields
+await runtime.run('delayedOp');
+// Starting another before resume completes:
+await runtime.run('anotherOp'); // Throws NestedAsyncError
 ```
 
 ---
 
-## References
+## Integration with Abilities
 
-- [ABI.md](./ABI.md) — Memory layout, ObjTag definitions
-- [FFI.md](./FFI.md) — FFI protocol, handler interface
-- [TODO.md](./TODO.md) — Known limitations, future work
-- [Compile.hs](../src/Unison/Wasm/Compile.hs) — Current TFOp compilation
-- [runtime.ts](../js/src/runtime.ts) — JS runtime with async infrastructure
-- [continuation.ts](../js/src/continuation.ts) — ContinuationHandle class
+Async yield preserves Unison's ability system:
 
+- `k_ptr`: Saved/restored for ability handler call stack
+- `denv_ptr`: Saved/restored for handler dispatch table
+
+This ensures that after resuming from `IO.delay`, ability handlers still work correctly.
+
+---
+
+## Compiler Integration
+
+### TFOp Compilation
+
+Foreign function calls (`TFOp`) emit:
+
+1. FFI call instruction
+2. Yield sentinel check
+3. If yielding: save locals, create AsyncCont, return sentinel
+4. If not yielding: continue with result
+
+### Yield Point Markers
+
+The compiler inserts `YieldPointStart`/`YieldPointEnd` markers around FFI calls. The state machine transformation uses these to split code into segments.
+
+### State Machine Transformation
+
+`Unison.Wasm.Compile.Async.transformToStateMachine`:
+
+1. Identifies yield points via markers
+2. Splits function body into segments
+3. Wraps in nested blocks with state variable
+4. Adds resume dispatcher at entry
+5. Adds `br_table` for state dispatch
+
+---
+
+## Performance Considerations
+
+- **No yield overhead for sync calls**: If FFI returns immediately (not `YIELD_SENTINEL`), execution continues without state saving
+- **O(1) resume dispatch**: `br_table` provides constant-time jump to resume point
+- **Minimal heap allocation**: Only allocates AsyncCont when actually yielding
+- **Locals saved once**: Locals array allocated on yield, not every call
+
+---
+
+## Alternatives Considered
+
+### Asyncify
+
+Emscripten's general-purpose solution that rewinds the entire WASM stack.
+
+**Why not?** 30% code size overhead, requires post-processing, we already have ability machinery.
+
+### JSPI (JavaScript Promise Integration)
+
+WebAssembly proposal for automatic Promise handling.
+
+**Why not?** Doesn't support Unison's delimited continuations. Ability handlers (`TShift`/`TKon`) require manual K-stack control that JSPI doesn't provide.
+
+---
+
+## See Also
+
+- [ABI.md](./ABI.md) — Memory layout, object tags
+- [FFI.md](./FFI.md) — Foreign function interface
+- [Compile/Async.hs](../src/Unison/Wasm/Compile/Async.hs) — State machine transformation
+- [runtime.ts](../js/src/runtime.ts) — JavaScript runtime
