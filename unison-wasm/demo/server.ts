@@ -66,21 +66,12 @@ async function loadWasm(): Promise<void> {
   console.log('✅ WASM module loaded from', wasmPath);
 }
 
-/**
- * Format cents as dollars
- */
-function formatCents(cents: number): string {
-  const dollars = Math.floor(cents / 100);
-  const remainder = cents % 100;
-  return `$${dollars}.${remainder.toString().padStart(2, '0')}`;
-}
-
 // Serve static files
 const demoDir = join(__dirname, '..');
 app.use(express.static(demoDir));
 app.use('/dist', express.static(__dirname));
 
-// Unified price endpoint
+// Price endpoint - returns raw WASM result
 // GET /api/price?qty=5&delay=500
 app.get('/api/price', async (req, res) => {
   const qty = parseInt(req.query.qty as string) || 1;
@@ -93,39 +84,17 @@ app.get('/api/price', async (req, res) => {
 
   try {
     const delayMicros = BigInt(delayMs * 1000);
-    const startTime = Date.now();
-
-    // Call calculatePrice - run() auto-parses DataG records into tuples
     const [subtotal, discount, total] = await runtime.run('calculatePrice', delayMicros, BigInt(qty));
-    const elapsed = Date.now() - startTime;
 
     res.json({
-      quantity: qty,
-      delay: delayMs,
-      elapsed,
       subtotal: Number(subtotal),
       discount: Number(discount),
       total: Number(total),
-      formatted: {
-        subtotal: formatCents(Number(subtotal)),
-        discount: formatCents(Number(discount)),
-        total: formatCents(Number(total)),
-      },
-      source: 'unison-wasm'
     });
   } catch (error) {
     console.error('[API] Error:', error);
     res.status(500).json({ error: String(error) });
   }
-});
-
-// Health check
-app.get('/api/health', (_, res) => {
-  res.json({
-    status: 'ok',
-    wasmLoaded: runtime !== null,
-    timestamp: new Date().toISOString()
-  });
 });
 
 // Start server
@@ -134,14 +103,10 @@ async function main() {
 
   app.listen(PORT, () => {
     console.log('');
-    console.log('🚀 Unison WASM Demo Server');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log(`   http://localhost:${PORT}`);
+    console.log(`🚀 Unison WASM Demo Server: http://localhost:${PORT}`);
     console.log('');
     console.log('   API:');
     console.log(`   GET /api/price?qty=5&delay=1000`);
-    console.log(`   GET /api/health`);
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   });
 }
 

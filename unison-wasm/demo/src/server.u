@@ -29,4 +29,3 @@ server.main = do
 
   printLine "Note: Full HTTP server requires UCM HTTP abilities."
   printLine "For the demo, we use the Node.js server with the same WASM module."
-
