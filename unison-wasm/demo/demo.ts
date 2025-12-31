@@ -125,7 +125,7 @@ async function loadWasm(): Promise<void> {
   // IO.delay.impl.v3 handler - sync stub for browser
   // Full async would require yield/resume
   runtime.registerForeign('IO_delay_impl_v3', (_rt, microseconds: bigint): bigint => {
-    const ms = Number(microseconds) / 1000;
+        const ms = Number(microseconds) / 1000;
     console.log(`[IO.delay] ${ms}ms (sync stub)`);
     return 0n; // Unit
   });

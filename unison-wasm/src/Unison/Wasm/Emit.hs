@@ -218,6 +218,12 @@ data WatInstr
     Comment String
   | -- | Nop (no operation)
     Nop
+  | -- | Yield point marker (for async state machine transformation)
+    -- YieldPointStart N marks the beginning of yield point N (before FFI call)
+    -- YieldPointEnd N marks the end of yield point N (resume point after FFI)
+    -- These are removed during post-processing and replaced with state machine control flow
+    YieldPointStart Int
+  | YieldPointEnd Int
   deriving (Eq, Show)
 
 -- | A WASM function definition
@@ -392,6 +398,10 @@ emitInstr Unreachable = "unreachable"
 emitInstr Drop = "drop"
 emitInstr (Comment s) = ";; " ++ s
 emitInstr Nop = "nop"
+-- Yield point markers should be processed by state machine transformation before emission
+-- If they reach here, emit a comment (for debugging) but they indicate incomplete processing
+emitInstr (YieldPointStart n) = ";; YIELD_POINT_START " ++ show n ++ " (ERROR: should be processed)"
+emitInstr (YieldPointEnd n) = ";; YIELD_POINT_END " ++ show n ++ " (ERROR: should be processed)"
 
 -- | Emit a global variable definition
 emitGlobal :: WatGlobal -> String

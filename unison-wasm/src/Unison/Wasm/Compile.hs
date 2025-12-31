@@ -82,6 +82,7 @@ import Unison.Util.EnumContainers qualified as EC
 import Unison.Var (Var)
 import Unison.Var qualified as Var
 import Unison.Wasm.ABI qualified as ABI
+import Unison.Wasm.Compile.Async qualified as Async
 import Unison.Wasm.Compile.Builtins qualified as Builtins
 import Unison.Wasm.Compile.Context
   ( CompileCtx (..),
@@ -450,9 +451,23 @@ compileSuperNormalWithCtx funcNames _currentFunc (Lambda mems body) name = do
         , ("__ffi_result", I64)     -- TFOp: FFI result for yield check
         , ("__async_locals_ptr", I32) -- TFOp: Pointer to saved locals array
         ]
+
+      -- Check if this function has yield points and needs state machine transformation
+      hasAsync = Async.hasYieldPoints bodyInstrs
+
+      -- Add state machine locals if needed
+      asyncLocals = if hasAsync
+        then [("__state", I32)]  -- State variable for state machine
+        else []
+
       -- Locals are all variables bound after the parameters plus helpers
-      funcLocals' = drop (length mems) (ctxLocals finalCtx) ++ helperLocals
+      funcLocals' = drop (length mems) (ctxLocals finalCtx) ++ helperLocals ++ asyncLocals
       funcResults = [I64] -- All functions return i64 (boxed values or unboxed integers)
+
+      -- Apply state machine transformation if function has yield points
+      transformedBody = if hasAsync
+        then Async.transformToStateMachine funcLocals' bodyInstrs
+        else bodyInstrs
 
   pure
     WatFunction
@@ -460,7 +475,7 @@ compileSuperNormalWithCtx funcNames _currentFunc (Lambda mems body) name = do
         funcParams = funcParams,
         funcLocals = funcLocals',
         funcResults = funcResults,
-        funcBody = bodyInstrs
+        funcBody = transformedBody
       }
 
 -- | Unwrap nested TAbs to get variable bindings and inner term
@@ -1399,6 +1414,9 @@ compileArgs ctx (v:vs) = do
 -- * funcTableIdx - this function's index in the function table
 -- * yieldPointId - unique ID for this yield point (for br_table resume)
 -- * localNames - list of (name, type) for all locals to save
+--
+-- The generated code includes YieldPointStart/YieldPointEnd markers that are
+-- processed by the state machine transformation in compileSuperNormal.
 ffiCallWithYieldCheckFull ::
   String ->          -- FFI function name
   Int ->             -- Function table index
@@ -1416,7 +1434,9 @@ ffiCallWithYieldCheckFull funcName funcTableIdx yieldPointId locals =
           I64Store (fromIntegral (idx * 8 :: Int))
         ]
   in
-  [ Call funcName,
+  [ -- Mark start of yield point (for state machine transformation)
+    YieldPointStart yieldPointId,
+    Call funcName,
     -- Save result to local, keep on stack for comparison
     LocalTee "__ffi_result",
     -- Compare with YIELD_SENTINEL
@@ -1451,6 +1471,8 @@ ffiCallWithYieldCheckFull funcName funcTableIdx yieldPointId locals =
            ]
       )
       [],
+    -- Mark end of yield point (resume point - code after this uses __ffi_result)
+    YieldPointEnd yieldPointId,
     -- Normal path: restore result to stack
     LocalGet "__ffi_result"
   ]

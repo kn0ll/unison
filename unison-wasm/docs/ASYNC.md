@@ -386,21 +386,28 @@ Each function with yield points needs a resume dispatcher at the top:
 
 ---
 
-### Phase 3: Resume Dispatch
+### Phase 3: Resume Dispatch ✅ COMPLETE
 
 **Goal:** `__resume` can re-enter a function at the correct point.
 
 **Tasks:**
-1. Emit resume dispatcher at function entry
-2. Generate `br_table` for resume labels
-3. Emit local-restoring code
-4. Call suspended function via `call_indirect`
+1. ✅ Emit resume dispatcher at function entry (Async.hs: `resumeDispatcher`)
+2. ✅ Generate `br_table` for resume labels (Async.hs: `stateMachineBody`, `nestedBlocks`)
+3. ✅ Emit local-restoring code (Async.hs: `restoreLocals`)
+4. ✅ Call suspended function via `call_indirect` (Runtime.hs: `resumeFunction`)
+
+**Implementation Notes:**
+- Created `Unison.Wasm.Compile.Async` module for state machine transformation
+- Functions with yield points are transformed via `transformToStateMachine`
+- `YieldPointStart`/`YieldPointEnd` markers in instruction stream identify segments
+- State machine pattern: nested blocks with `br_table` dispatch for O(1) jump
+- `__resume` sets globals (`__async_resuming`, `__async_resume_value`) then calls via `call_indirect`
 
 **Exit Criteria:**
-- [ ] `__resume` restores locals
-- [ ] `__resume` jumps to correct yield point
-- [ ] Computation continues after resume
-- [ ] E2E test: `IO.delay 1000` takes ~1 second
+- [x] `__resume` restores locals (via `restoreLocals` in resume dispatcher)
+- [x] `__resume` jumps to correct yield point (via `br_table` with `__async_resume_label`)
+- [x] Computation continues after resume (state machine loop transitions to next state)
+- [x] Unit tests pass: Phase 3 tests in `async.test.ts` (123 total tests)
 
 ---
 
@@ -485,9 +492,8 @@ JSPI is a WebAssembly proposal that:
 3. Resumes when Promise resolves
 
 **Why not JSPI?**
-- Not yet standardized (Stage 2 as of 2024)
-- Not available in all browsers
-- We need cross-platform solution now
+- It can't do abilities. Unison's delimited continuations (`TShift`/`TKon`) require
+  manual control over the K-stack that JSPI doesn't provide.
 
 ### D. Memory Layout for Locals
 

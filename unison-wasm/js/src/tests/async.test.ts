@@ -783,3 +783,583 @@ describe('Phase 2: Local State Saving', () => {
   });
 });
 
+// =============================================================================
+// Phase 3: Resume Dispatch Tests
+// =============================================================================
+
+describe('Phase 3: Resume Dispatch', () => {
+  // Test __resume sets up globals and calls via call_indirect
+  it('__resume sets __async_resuming flag and calls function', async () => {
+    // This WAT simulates a function that checks __async_resuming
+    // and returns different values based on whether it's being resumed
+    const wat = `(module
+      (import "ffi" "async_op" (func $async_op (result i64)))
+
+      (memory (export "memory") 1)
+      (global $heap_ptr (mut i32) (i32.const 1024))
+      (global $k_ptr (mut i32) (i32.const 0))
+      (global $async_cont_id (mut i64) (i64.const 0))
+      (global $async_cont_ptr (export "async_cont_ptr") (mut i32) (i32.const 0))
+      (global $__async_resuming (export "__async_resuming") (mut i32) (i32.const 0))
+      (global $__async_resume_label (mut i32) (i32.const 0))
+      (global $__async_resume_value (export "__async_resume_value") (mut i64) (i64.const 0))
+
+      (type $fn_type (func (result i64)))
+      (table (export "__indirect_function_table") 2 funcref)
+      (elem (i32.const 0) $nop_func $resumable_func)
+
+      (func $nop_func (result i64) i64.const 0)
+
+      (func $__alloc (param $size i32) (result i32)
+        (local $ptr i32)
+        global.get $heap_ptr
+        local.set $ptr
+        global.get $heap_ptr
+        local.get $size
+        i32.add
+        global.set $heap_ptr
+        local.get $ptr
+      )
+
+      ;; A function that checks __async_resuming and behaves accordingly
+      (func $resumable_func (export "resumable_func") (result i64)
+        (local $__ffi_result i64)
+
+        ;; Check if we're resuming
+        global.get $__async_resuming
+        if (result i64)
+          ;; Resuming: clear flag and return resume value + 1000
+          i32.const 0
+          global.set $__async_resuming
+          global.get $__async_resume_value
+          i64.const 1000
+          i64.add
+        else
+          ;; Normal entry: call FFI
+          call $async_op
+          local.set $__ffi_result
+
+          ;; Check for yield
+          local.get $__ffi_result
+          i64.const -2  ;; YIELD_SENTINEL
+          i64.eq
+          if (result i64)
+            ;; Yielding - return sentinel
+            i64.const -2
+          else
+            ;; Normal return - add 100 to result
+            local.get $__ffi_result
+            i64.const 100
+            i64.add
+          end
+        end
+      )
+
+      ;; Mock __resume that sets up globals and calls via call_indirect
+      (func $__resume (export "__resume") (param $func_idx i32) (param $value i64) (result i64)
+        ;; Set resume value
+        local.get $value
+        global.set $__async_resume_value
+
+        ;; Set resuming flag
+        i32.const 1
+        global.set $__async_resuming
+
+        ;; Call function via call_indirect
+        local.get $func_idx
+        call_indirect (type $fn_type)
+      )
+    )`;
+
+    // First call - FFI yields
+    let yieldCalled = false;
+    const imports: WebAssembly.Imports = {
+      ffi: {
+        async_op: () => {
+          yieldCalled = true;
+          return -2n;  // YIELD_SENTINEL
+        },
+      },
+    };
+
+    const instance = await instantiateWatWithImports(wat, imports);
+    const resumableFunc = instance.exports['resumable_func'] as () => bigint;
+    const resume = instance.exports['__resume'] as (funcIdx: number, value: bigint) => bigint;
+    const asyncResuming = instance.exports['__async_resuming'] as WebAssembly.Global;
+    const asyncResumeValue = instance.exports['__async_resume_value'] as WebAssembly.Global;
+
+    // Initial call - should yield
+    const result1 = resumableFunc();
+    assert.strictEqual(yieldCalled, true, 'FFI should be called');
+    assert.strictEqual(result1, -2n, 'Should return YIELD_SENTINEL');
+
+    // Resume with value 42
+    // func_idx = 1 (resumable_func is at index 1 in table)
+    const result2 = resume(1, 42n);
+    assert.strictEqual(result2, 1042n, 'Resumed function should return 42 + 1000');
+
+    // Verify globals are reset
+    assert.strictEqual(asyncResuming.value, 0, '__async_resuming should be cleared');
+    assert.strictEqual(asyncResumeValue.value, 42n, '__async_resume_value should contain resume value');
+  });
+
+  it('br_table jumps to correct state based on __async_resume_label', async () => {
+    // This tests the state machine structure with br_table
+    // State 0: returns 100
+    // State 1: returns 200
+    // State 2: returns 300
+    const wat = `(module
+      (memory (export "memory") 1)
+      (global $__async_resuming (mut i32) (i32.const 0))
+      (global $__async_resume_label (mut i32) (i32.const 0))
+      (global $__async_resume_value (mut i64) (i64.const 0))
+
+      (func $state_machine (export "state_machine") (result i64)
+        (local $__state i32)
+        (local $__result i64)
+
+        ;; Resume dispatcher
+        global.get $__async_resuming
+        if
+          i32.const 0
+          global.set $__async_resuming
+          global.get $__async_resume_label
+          local.set $__state
+        else
+          i32.const 0
+          local.set $__state
+        end
+
+        ;; State machine with br_table - all blocks have no result
+        (block $exit
+          (block $state_2
+            (block $state_1
+              (block $state_0
+                local.get $__state
+                br_table $state_0 $state_1 $state_2 $exit
+              )
+              ;; State 0
+              i64.const 100
+              local.set $__result
+              br $exit
+            )
+            ;; State 1
+            i64.const 200
+            local.set $__result
+            br $exit
+          )
+          ;; State 2
+          i64.const 300
+          local.set $__result
+        )
+        local.get $__result
+      )
+
+      (func $set_resume_state (export "set_resume_state") (param $label i32)
+        i32.const 1
+        global.set $__async_resuming
+        local.get $label
+        global.set $__async_resume_label
+      )
+    )`;
+
+    const instance = await instantiateWatWithImports(wat, {});
+    const stateMachine = instance.exports['state_machine'] as () => bigint;
+    const setResumeState = instance.exports['set_resume_state'] as (label: number) => void;
+
+    // Normal entry - should hit state 0
+    const result0 = stateMachine();
+    assert.strictEqual(result0, 100n, 'Normal entry should go to state 0');
+
+    // Resume at state 1
+    setResumeState(1);
+    const result1 = stateMachine();
+    assert.strictEqual(result1, 200n, 'Resume at label 1 should go to state 1');
+
+    // Resume at state 2
+    setResumeState(2);
+    const result2 = stateMachine();
+    assert.strictEqual(result2, 300n, 'Resume at label 2 should go to state 2');
+  });
+
+  it('locals are correctly restored from AsyncCont on resume', async () => {
+    // Tests that saved locals are correctly loaded back when resuming
+    const wat = `(module
+      (memory (export "memory") 1)
+      (global $heap_ptr (mut i32) (i32.const 1024))
+      (global $async_cont_ptr (export "async_cont_ptr") (mut i32) (i32.const 0))
+      (global $__async_resuming (mut i32) (i32.const 0))
+      (global $__async_resume_label (mut i32) (i32.const 0))
+      (global $__async_resume_value (mut i64) (i64.const 0))
+
+      (func $__alloc (param $size i32) (result i32)
+        (local $ptr i32)
+        global.get $heap_ptr
+        local.set $ptr
+        global.get $heap_ptr
+        local.get $size
+        i32.add
+        global.set $heap_ptr
+        local.get $ptr
+      )
+
+      ;; Save test values to an "AsyncCont-like" structure
+      (func $setup_resume_state (export "setup_resume_state")
+            (param $local0 i64) (param $local1 i64) (param $local2 i64)
+        (local $locals_ptr i32)
+
+        ;; Allocate space for 3 locals (24 bytes)
+        i32.const 24
+        call $__alloc
+        local.set $locals_ptr
+
+        ;; Store locals
+        local.get $locals_ptr
+        local.get $local0
+        i64.store offset=0
+        local.get $locals_ptr
+        local.get $local1
+        i64.store offset=8
+        local.get $locals_ptr
+        local.get $local2
+        i64.store offset=16
+
+        ;; Allocate AsyncCont (simplified - just header + locals_ptr at offset 20)
+        i32.const 40
+        call $__alloc
+        global.set $async_cont_ptr
+
+        ;; Store locals_ptr at offset 20
+        global.get $async_cont_ptr
+        local.get $locals_ptr
+        i32.store offset=20
+
+        ;; Set resuming flag
+        i32.const 1
+        global.set $__async_resuming
+      )
+
+      ;; Function that restores locals from AsyncCont and returns their sum
+      (func $compute_with_restored_locals (export "compute_with_restored_locals") (result i64)
+        (local $a i64)
+        (local $b i64)
+        (local $c i64)
+        (local $__async_locals_ptr i32)
+
+        ;; Check if resuming
+        global.get $__async_resuming
+        if (result i64)
+          i32.const 0
+          global.set $__async_resuming
+
+          ;; Get locals pointer from AsyncCont
+          global.get $async_cont_ptr
+          i32.load offset=20
+          local.set $__async_locals_ptr
+
+          ;; Restore locals
+          local.get $__async_locals_ptr
+          i64.load offset=0
+          local.set $a
+          local.get $__async_locals_ptr
+          i64.load offset=8
+          local.set $b
+          local.get $__async_locals_ptr
+          i64.load offset=16
+          local.set $c
+
+          ;; Return sum of restored locals
+          local.get $a
+          local.get $b
+          i64.add
+          local.get $c
+          i64.add
+        else
+          ;; Normal entry - return 0
+          i64.const 0
+        end
+      )
+    )`;
+
+    const instance = await instantiateWatWithImports(wat, {});
+    const setupResumeState = instance.exports['setup_resume_state'] as (a: bigint, b: bigint, c: bigint) => void;
+    const computeWithRestoredLocals = instance.exports['compute_with_restored_locals'] as () => bigint;
+
+    // Normal entry
+    const normalResult = computeWithRestoredLocals();
+    assert.strictEqual(normalResult, 0n, 'Normal entry should return 0');
+
+    // Setup resume state with values 100, 200, 300
+    setupResumeState(100n, 200n, 300n);
+
+    // Resume should restore locals and compute sum
+    const resumeResult = computeWithRestoredLocals();
+    assert.strictEqual(resumeResult, 600n, 'Resumed function should return sum of restored locals: 100+200+300=600');
+  });
+
+  it('full yield-resume cycle with state machine', async () => {
+    // End-to-end test: call FFI, yield, resume, continue with correct state
+    const wat = `(module
+      (import "ffi" "async_op" (func $async_op (result i64)))
+
+      (memory (export "memory") 1)
+      (global $heap_ptr (mut i32) (i32.const 1024))
+      (global $k_ptr (mut i32) (i32.const 0))
+      (global $async_cont_id (mut i64) (i64.const 0))
+      (global $async_cont_ptr (export "async_cont_ptr") (mut i32) (i32.const 0))
+      (global $__async_resuming (export "__async_resuming") (mut i32) (i32.const 0))
+      (global $__async_resume_label (mut i32) (i32.const 0))
+      (global $__async_resume_value (export "__async_resume_value") (mut i64) (i64.const 0))
+
+      (type $fn_type (func (result i64)))
+      (table (export "__indirect_function_table") 2 funcref)
+      (elem (i32.const 0) $nop_func $main_func)
+
+      (func $nop_func (result i64) i64.const 0)
+
+      (func $__alloc (param $size i32) (result i32)
+        (local $ptr i32)
+        global.get $heap_ptr
+        local.set $ptr
+        global.get $heap_ptr
+        local.get $size
+        i32.add
+        global.set $heap_ptr
+        local.get $ptr
+      )
+
+      (func $__alloc_locals_array (export "__alloc_locals_array") (param $count i32) (result i32)
+        local.get $count
+        i32.const 8
+        i32.mul
+        call $__alloc
+      )
+
+      (func $__alloc_async_cont (export "__alloc_async_cont")
+            (param $cont_id i64) (param $k_ptr i32) (param $locals_ptr i32)
+            (param $locals_count i32) (param $func_idx i32) (param $resume_label i32) (result i32)
+        (local $ptr i32)
+
+        ;; Allocate 40 bytes for AsyncCont
+        i32.const 40
+        call $__alloc
+        local.set $ptr
+
+        ;; Store cont_id at offset 8
+        local.get $ptr
+        local.get $cont_id
+        i64.store offset=8
+
+        ;; Store k_ptr at offset 16
+        local.get $ptr
+        local.get $k_ptr
+        i32.store offset=16
+
+        ;; Store locals_ptr at offset 20
+        local.get $ptr
+        local.get $locals_ptr
+        i32.store offset=20
+
+        ;; Store locals_count at offset 24
+        local.get $ptr
+        local.get $locals_count
+        i32.store offset=24
+
+        ;; Store func_idx at offset 28
+        local.get $ptr
+        local.get $func_idx
+        i32.store offset=28
+
+        ;; Store resume_label at offset 32
+        local.get $ptr
+        local.get $resume_label
+        i32.store offset=32
+
+        local.get $ptr
+      )
+
+      ;; Main function with full state machine pattern
+      (func $main_func (export "main_func") (result i64)
+        (local $x i64)
+        (local $y i64)
+        (local $__state i32)
+        (local $__ffi_result i64)
+        (local $__async_locals_ptr i32)
+        (local $__result i64)
+
+        ;; === Resume Dispatcher ===
+        global.get $__async_resuming
+        if
+          ;; Resuming
+          i32.const 0
+          global.set $__async_resuming
+
+          ;; Restore locals from AsyncCont
+          global.get $async_cont_ptr
+          i32.load offset=20
+          local.set $__async_locals_ptr
+
+          local.get $__async_locals_ptr
+          i64.load offset=0
+          local.set $x
+          local.get $__async_locals_ptr
+          i64.load offset=8
+          local.set $y
+
+          ;; Get resume value as FFI result
+          global.get $__async_resume_value
+          local.set $__ffi_result
+
+          ;; Get resume label as state
+          global.get $async_cont_ptr
+          i32.load offset=32
+          local.set $__state
+        else
+          ;; Normal entry
+          i32.const 0
+          local.set $__state
+        end
+
+        ;; === State Machine (no result type on blocks for br_table consistency) ===
+        (block $exit
+          (loop $loop
+            (block $state_1
+              (block $state_0
+                local.get $__state
+                br_table $state_0 $state_1 $exit
+              )
+              ;; === STATE 0 ===
+              ;; Initialize locals
+              i64.const 10
+              local.set $x
+              i64.const 20
+              local.set $y
+
+              ;; Call FFI
+              call $async_op
+              local.set $__ffi_result
+
+              ;; Check for yield
+              local.get $__ffi_result
+              i64.const -2
+              i64.eq
+              if
+                ;; === YIELD PATH ===
+                ;; Allocate locals array
+                i32.const 2  ;; 2 locals
+                call $__alloc_locals_array
+                local.set $__async_locals_ptr
+
+                ;; Save locals
+                local.get $__async_locals_ptr
+                local.get $x
+                i64.store offset=0
+                local.get $__async_locals_ptr
+                local.get $y
+                i64.store offset=8
+
+                ;; Increment cont_id
+                global.get $async_cont_id
+                i64.const 1
+                i64.add
+                global.set $async_cont_id
+
+                ;; Create AsyncCont
+                global.get $async_cont_id
+                global.get $k_ptr
+                local.get $__async_locals_ptr
+                i32.const 2   ;; locals_count
+                i32.const 1   ;; func_idx (main_func is at index 1)
+                i32.const 1   ;; resume_label (state 1)
+                call $__alloc_async_cont
+                global.set $async_cont_ptr
+
+                ;; Return YIELD_SENTINEL
+                i64.const -2
+                local.set $__result
+                br $exit
+              end
+
+              ;; Transition to state 1
+              i32.const 1
+              local.set $__state
+              br $loop
+            )
+            ;; === STATE 1 ===
+            ;; Compute result: x + y + ffi_result
+            local.get $x
+            local.get $y
+            i64.add
+            local.get $__ffi_result
+            i64.add
+            local.set $__result
+            br $exit
+          )
+        )
+        local.get $__result
+      )
+
+      ;; __resume: sets up globals and calls via call_indirect
+      (func $__resume (export "__resume") (param $value i64) (result i64)
+        (local $func_idx i32)
+
+        ;; Store resume value
+        local.get $value
+        global.set $__async_resume_value
+
+        ;; Set resuming flag
+        i32.const 1
+        global.set $__async_resuming
+
+        ;; Get func_idx from AsyncCont
+        global.get $async_cont_ptr
+        i32.load offset=28
+        local.set $func_idx
+
+        ;; Call function via call_indirect
+        local.get $func_idx
+        call_indirect (type $fn_type)
+      )
+    )`;
+
+    let yieldCount = 0;
+    const imports: WebAssembly.Imports = {
+      ffi: {
+        async_op: () => {
+          yieldCount++;
+          return -2n;  // YIELD_SENTINEL
+        },
+      },
+    };
+
+    const instance = await instantiateWatWithImports(wat, imports);
+    const mainFunc = instance.exports['main_func'] as () => bigint;
+    const resume = instance.exports['__resume'] as (value: bigint) => bigint;
+    const asyncContPtr = instance.exports['async_cont_ptr'] as WebAssembly.Global;
+    const memory = instance.exports['memory'] as WebAssembly.Memory;
+
+    // First call - should yield
+    const result1 = mainFunc();
+    assert.strictEqual(result1, -2n, 'First call should yield');
+    assert.strictEqual(yieldCount, 1, 'FFI should be called once');
+    assert.notStrictEqual(asyncContPtr.value, 0, 'AsyncCont should be allocated');
+
+    // Verify saved locals in AsyncCont
+    const view = new DataView(memory.buffer);
+    const localsPtr = view.getUint32(asyncContPtr.value + 20, true);
+    const savedX = view.getBigInt64(localsPtr, true);
+    const savedY = view.getBigInt64(localsPtr + 8, true);
+    assert.strictEqual(savedX, 10n, 'Saved x should be 10');
+    assert.strictEqual(savedY, 20n, 'Saved y should be 20');
+
+    // Resume with value 100
+    const result2 = resume(100n);
+
+    // Expected: x + y + resume_value = 10 + 20 + 100 = 130
+    assert.strictEqual(result2, 130n, 'Resume should compute x + y + value = 10 + 20 + 100 = 130');
+
+    // FFI should NOT be called again (we resumed past it)
+    assert.strictEqual(yieldCount, 1, 'FFI should still be called only once');
+  });
+});
+

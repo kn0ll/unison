@@ -1079,53 +1079,62 @@ allocLocalsArrayFunction =
 -- | Resume function: @__resume(cont_id, value) -> i64@
 --
 -- Called by JS to resume a yielded computation.
--- This is a placeholder - the actual resumption logic requires knowing
--- the suspended function's context, which we'll handle via the async cont object.
---
--- For MVP, this function:
+-- This function:
 -- 1. Validates the continuation ID matches
--- 2. Loads the saved state from the async cont object
--- 3. Restores K and locals
--- 4. Returns the value (to be picked up by the suspended function)
---
--- Note: In the full implementation, resumption is more complex because we need
--- to restore control to the exact suspension point. For MVP, we use a simpler
--- scheme where async functions check the result and return early on yield.
+-- 2. Loads the saved state from the async cont object into globals
+-- 3. Sets the __async_resuming flag
+-- 4. Stores the resume value in __async_resume_value
+-- 5. Calls the suspended function via call_indirect
 resumeFunction :: WatFunction
 resumeFunction =
   WatFunction
     { funcName = "__resume",
       funcParams = [("cont_id", I64), ("value", I64)],
-      funcLocals = [("cont_ptr", I32)],
+      funcLocals = [("cont_ptr", I32), ("func_idx", I32)],
       funcResults = [I64],
       funcBody =
         [ Comment "Resume a suspended async computation",
           -- Get the async cont pointer from global
           GlobalGet "async_cont_ptr",
           LocalSet "cont_ptr",
+
           -- Validate cont_id matches
           LocalGet "cont_ptr",
           I64Load (fromIntegral ABI.asyncContIdOffset),
           LocalGet "cont_id",
           I64Eq,
-          -- If mismatch, trap (in production would throw InvalidContinuationError)
-          -- For now we just return 0 on mismatch
           I32Eqz,
-          IfVoid [I64Const 0, Return] [],
-          -- Mark as resumed
+          -- If mismatch, trap (invalid continuation)
+          IfVoid [Unreachable] [],
+
+          -- Check status is Pending (0)
+          LocalGet "cont_ptr",
+          I32Load (fromIntegral ABI.asyncContStatusOffset),
+          -- If not 0, trap (already resumed or freed)
+          IfVoid [Unreachable] [],
+
+          -- Mark as Resumed (1)
           LocalGet "cont_ptr",
           I32Const (fromIntegral ABI.asyncStatusResumed),
           I32Store (fromIntegral ABI.asyncContStatusOffset),
-          -- Restore K pointer
+
+          -- Store the resume value in global (to be picked up by state machine)
+          LocalGet "value",
+          GlobalSet "__async_resume_value",
+
+          -- Set the resuming flag
+          I32Const 1,
+          GlobalSet "__async_resuming",
+
+          -- Load function index from AsyncCont
           LocalGet "cont_ptr",
-          I32Load (fromIntegral ABI.asyncContKPtrOffset),
-          GlobalSet "k_ptr",
-          -- Clear async state
-          I64Const 0,
-          GlobalSet "async_cont_id",
-          I32Const 0,
-          GlobalSet "async_cont_ptr",
-          -- Return the resume value
-          LocalGet "value"
+          I32Load (fromIntegral ABI.asyncContFuncIdxOffset),
+          LocalSet "func_idx",
+
+          -- Call the suspended function via call_indirect
+          -- The function will check __async_resuming, restore locals from AsyncCont,
+          -- and jump to the correct resume point
+          LocalGet "func_idx",
+          CallIndirect "__fn_type"
         ]
     }
