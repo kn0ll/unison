@@ -485,6 +485,7 @@ describe('Phase 2: Local State Saving', () => {
       ;; Globals for runtime state
       (global $heap_ptr (mut i32) (i32.const 1024))
       (global $k_ptr (mut i32) (i32.const 0))
+      (global $denv_ptr (mut i32) (i32.const 0))
       (global $async_cont_id (mut i64) (i64.const 0))
       (global $async_cont_ptr (export "async_cont_ptr") (mut i32) (i32.const 0))
 
@@ -509,19 +510,19 @@ describe('Phase 2: Local State Saving', () => {
       )
 
       ;; Allocate async cont object
-      ;; Args: cont_id (i64), k_ptr (i32), locals_ptr (i32), locals_count (i32), func_idx (i32), resume_label (i32)
+      ;; Args: cont_id (i64), k_ptr (i32), denv_ptr (i32), locals_ptr (i32), locals_count (i32), func_idx (i32), resume_label (i32)
       (func $__alloc_async_cont (export "__alloc_async_cont")
-            (param $cont_id i64) (param $k_ptr i32) (param $locals_ptr i32)
+            (param $cont_id i64) (param $k_ptr i32) (param $denv_ptr i32) (param $locals_ptr i32)
             (param $locals_count i32) (param $func_idx i32) (param $resume_label i32) (result i32)
         (local $ptr i32)
-        ;; Allocate 40 bytes for AsyncCont
-        i32.const 40
+        ;; Allocate 48 bytes for AsyncCont
+        i32.const 48
         call $__alloc
         local.set $ptr
 
-        ;; Store header (8 bytes: version=0, obj_tag=0x00b, size=40)
+        ;; Store header (8 bytes: version=0, obj_tag=0x00b, size=48)
         local.get $ptr
-        i64.const 0x0000002800B00000  ;; size=40, tag=0x00b, version=0
+        i64.const 0x0000003000B00000  ;; size=48, tag=0x00b, version=0
         i64.store
 
         ;; Store cont_id at offset 8
@@ -534,30 +535,35 @@ describe('Phase 2: Local State Saving', () => {
         local.get $k_ptr
         i32.store offset=16
 
-        ;; Store locals_ptr at offset 20
+        ;; Store denv_ptr at offset 20
         local.get $ptr
-        local.get $locals_ptr
+        local.get $denv_ptr
         i32.store offset=20
 
-        ;; Store locals_count at offset 24
+        ;; Store locals_ptr at offset 24
         local.get $ptr
-        local.get $locals_count
+        local.get $locals_ptr
         i32.store offset=24
 
-        ;; Store func_idx at offset 28
+        ;; Store locals_count at offset 28
         local.get $ptr
-        local.get $func_idx
+        local.get $locals_count
         i32.store offset=28
 
-        ;; Store resume_label at offset 32
+        ;; Store func_idx at offset 32
         local.get $ptr
-        local.get $resume_label
+        local.get $func_idx
         i32.store offset=32
 
-        ;; Store status (pending=0) at offset 36
+        ;; Store resume_label at offset 36
+        local.get $ptr
+        local.get $resume_label
+        i32.store offset=36
+
+        ;; Store status (pending=0) at offset 40
         local.get $ptr
         i32.const 0
-        i32.store offset=36
+        i32.store offset=40
 
         local.get $ptr
       )
@@ -612,9 +618,10 @@ describe('Phase 2: Local State Saving', () => {
           i64.add
           global.set $async_cont_id
 
-          ;; Create AsyncCont: cont_id, k_ptr, locals_ptr, locals_count, func_idx, resume_label
+          ;; Create AsyncCont: cont_id, k_ptr, denv_ptr, locals_ptr, locals_count, func_idx, resume_label
           global.get $async_cont_id  ;; cont_id
           global.get $k_ptr          ;; k_ptr
+          global.get $denv_ptr       ;; denv_ptr
           local.get $__async_locals_ptr  ;; locals_ptr
           i32.const 3                ;; locals_count
           i32.const 42               ;; func_idx (example: function table index 42)
@@ -1024,15 +1031,15 @@ describe('Phase 3: Resume Dispatch', () => {
         local.get $local2
         i64.store offset=16
 
-        ;; Allocate AsyncCont (simplified - just header + locals_ptr at offset 20)
-        i32.const 40
+        ;; Allocate AsyncCont (simplified - just header + locals_ptr at offset 24)
+        i32.const 48
         call $__alloc
         global.set $async_cont_ptr
 
-        ;; Store locals_ptr at offset 20
+        ;; Store locals_ptr at offset 24
         global.get $async_cont_ptr
         local.get $locals_ptr
-        i32.store offset=20
+        i32.store offset=24
 
         ;; Set resuming flag
         i32.const 1
@@ -1054,7 +1061,7 @@ describe('Phase 3: Resume Dispatch', () => {
 
           ;; Get locals pointer from AsyncCont
           global.get $async_cont_ptr
-          i32.load offset=20
+          i32.load offset=24
           local.set $__async_locals_ptr
 
           ;; Restore locals
@@ -1105,6 +1112,7 @@ describe('Phase 3: Resume Dispatch', () => {
       (memory (export "memory") 1)
       (global $heap_ptr (mut i32) (i32.const 1024))
       (global $k_ptr (mut i32) (i32.const 0))
+      (global $denv_ptr (mut i32) (i32.const 0))
       (global $async_cont_id (mut i64) (i64.const 0))
       (global $async_cont_ptr (export "async_cont_ptr") (mut i32) (i32.const 0))
       (global $__async_resuming (export "__async_resuming") (mut i32) (i32.const 0))
@@ -1136,12 +1144,12 @@ describe('Phase 3: Resume Dispatch', () => {
       )
 
       (func $__alloc_async_cont (export "__alloc_async_cont")
-            (param $cont_id i64) (param $k_ptr i32) (param $locals_ptr i32)
+            (param $cont_id i64) (param $k_ptr i32) (param $denv_ptr i32) (param $locals_ptr i32)
             (param $locals_count i32) (param $func_idx i32) (param $resume_label i32) (result i32)
         (local $ptr i32)
 
-        ;; Allocate 40 bytes for AsyncCont
-        i32.const 40
+        ;; Allocate 48 bytes for AsyncCont
+        i32.const 48
         call $__alloc
         local.set $ptr
 
@@ -1155,25 +1163,30 @@ describe('Phase 3: Resume Dispatch', () => {
         local.get $k_ptr
         i32.store offset=16
 
-        ;; Store locals_ptr at offset 20
+        ;; Store denv_ptr at offset 20
         local.get $ptr
-        local.get $locals_ptr
+        local.get $denv_ptr
         i32.store offset=20
 
-        ;; Store locals_count at offset 24
+        ;; Store locals_ptr at offset 24
         local.get $ptr
-        local.get $locals_count
+        local.get $locals_ptr
         i32.store offset=24
 
-        ;; Store func_idx at offset 28
+        ;; Store locals_count at offset 28
         local.get $ptr
-        local.get $func_idx
+        local.get $locals_count
         i32.store offset=28
 
-        ;; Store resume_label at offset 32
+        ;; Store func_idx at offset 32
+        local.get $ptr
+        local.get $func_idx
+        i32.store offset=32
+
+        ;; Store resume_label at offset 36
         local.get $ptr
         local.get $resume_label
-        i32.store offset=32
+        i32.store offset=36
 
         local.get $ptr
       )
@@ -1194,9 +1207,19 @@ describe('Phase 3: Resume Dispatch', () => {
           i32.const 0
           global.set $__async_resuming
 
-          ;; Restore locals from AsyncCont
+          ;; Restore K pointer
+          global.get $async_cont_ptr
+          i32.load offset=16
+          global.set $k_ptr
+
+          ;; Restore denv pointer
           global.get $async_cont_ptr
           i32.load offset=20
+          global.set $denv_ptr
+
+          ;; Restore locals from AsyncCont
+          global.get $async_cont_ptr
+          i32.load offset=24
           local.set $__async_locals_ptr
 
           local.get $__async_locals_ptr
@@ -1212,7 +1235,7 @@ describe('Phase 3: Resume Dispatch', () => {
 
           ;; Get resume label as state
           global.get $async_cont_ptr
-          i32.load offset=32
+          i32.load offset=36
           local.set $__state
         else
           ;; Normal entry
@@ -1267,6 +1290,7 @@ describe('Phase 3: Resume Dispatch', () => {
                 ;; Create AsyncCont
                 global.get $async_cont_id
                 global.get $k_ptr
+                global.get $denv_ptr
                 local.get $__async_locals_ptr
                 i32.const 2   ;; locals_count
                 i32.const 1   ;; func_idx (main_func is at index 1)
@@ -1313,7 +1337,7 @@ describe('Phase 3: Resume Dispatch', () => {
 
         ;; Get func_idx from AsyncCont
         global.get $async_cont_ptr
-        i32.load offset=28
+        i32.load offset=32
         local.set $func_idx
 
         ;; Call function via call_indirect
@@ -1346,7 +1370,7 @@ describe('Phase 3: Resume Dispatch', () => {
 
     // Verify saved locals in AsyncCont
     const view = new DataView(memory.buffer);
-    const localsPtr = view.getUint32(asyncContPtr.value + 20, true);
+    const localsPtr = view.getUint32(asyncContPtr.value + 24, true);  // offset 24 for locals_ptr
     const savedX = view.getBigInt64(localsPtr, true);
     const savedY = view.getBigInt64(localsPtr + 8, true);
     assert.strictEqual(savedX, 10n, 'Saved x should be 10');
@@ -1360,6 +1384,507 @@ describe('Phase 3: Resume Dispatch', () => {
 
     // FFI should NOT be called again (we resumed past it)
     assert.strictEqual(yieldCount, 1, 'FFI should still be called only once');
+  });
+});
+
+// =============================================================================
+// Phase 4: K-Stack Integration Tests
+// =============================================================================
+
+describe('Phase 4: K-Stack Integration', () => {
+  // Test that k_ptr is correctly saved and restored
+  it('saves and restores k_ptr across yield', async () => {
+    const wat = `(module
+      (import "ffi" "async_op" (func $async_op (result i64)))
+
+      (memory (export "memory") 1)
+      (global $heap_ptr (mut i32) (i32.const 1024))
+      (global $k_ptr (export "k_ptr") (mut i32) (i32.const 0))
+      (global $denv_ptr (mut i32) (i32.const 0))
+      (global $async_cont_id (mut i64) (i64.const 0))
+      (global $async_cont_ptr (export "async_cont_ptr") (mut i32) (i32.const 0))
+      (global $__async_resuming (mut i32) (i32.const 0))
+      (global $__async_resume_value (mut i64) (i64.const 0))
+
+      (type $fn_type (func (result i64)))
+      (table (export "__indirect_function_table") 2 funcref)
+      (elem (i32.const 0) $nop_func $main_func)
+
+      (func $nop_func (result i64) i64.const 0)
+
+      (func $__alloc (param $size i32) (result i32)
+        (local $ptr i32)
+        global.get $heap_ptr
+        local.set $ptr
+        global.get $heap_ptr
+        local.get $size
+        i32.add
+        global.set $heap_ptr
+        local.get $ptr
+      )
+
+      (func $__alloc_async_cont (export "__alloc_async_cont")
+            (param $cont_id i64) (param $k_ptr i32) (param $denv_ptr i32)
+            (param $locals_ptr i32) (param $locals_count i32)
+            (param $func_idx i32) (param $resume_label i32) (result i32)
+        (local $ptr i32)
+        i32.const 48
+        call $__alloc
+        local.set $ptr
+
+        local.get $ptr
+        local.get $cont_id
+        i64.store offset=8
+
+        local.get $ptr
+        local.get $k_ptr
+        i32.store offset=16
+
+        local.get $ptr
+        local.get $denv_ptr
+        i32.store offset=20
+
+        local.get $ptr
+        local.get $locals_ptr
+        i32.store offset=24
+
+        local.get $ptr
+        local.get $locals_count
+        i32.store offset=28
+
+        local.get $ptr
+        local.get $func_idx
+        i32.store offset=32
+
+        local.get $ptr
+        local.get $resume_label
+        i32.store offset=36
+
+        local.get $ptr
+      )
+
+      ;; Setup: Push a fake K-stack frame
+      (func $setup_kstack (export "setup_kstack")
+        ;; Simulate a K-stack frame at address 2000
+        i32.const 2000
+        global.set $k_ptr
+      )
+
+      (func $main_func (export "main_func") (result i64)
+        (local $__ffi_result i64)
+
+        ;; Check if resuming
+        global.get $__async_resuming
+        if (result i64)
+          i32.const 0
+          global.set $__async_resuming
+
+          ;; Restore k_ptr from AsyncCont
+          global.get $async_cont_ptr
+          i32.load offset=16
+          global.set $k_ptr
+
+          ;; Return k_ptr as result (to verify it was restored)
+          global.get $k_ptr
+          i64.extend_i32_u
+        else
+          ;; Normal entry - call FFI
+          call $async_op
+          local.set $__ffi_result
+
+          local.get $__ffi_result
+          i64.const -2  ;; YIELD_SENTINEL
+          i64.eq
+          if (result i64)
+            ;; Save current k_ptr in AsyncCont
+            global.get $async_cont_id
+            i64.const 1
+            i64.add
+            global.set $async_cont_id
+
+            global.get $async_cont_id
+            global.get $k_ptr          ;; Save current k_ptr (should be 2000)
+            global.get $denv_ptr
+            i32.const 0                ;; no locals_ptr
+            i32.const 0                ;; no locals
+            i32.const 1                ;; func_idx
+            i32.const 0                ;; resume_label
+            call $__alloc_async_cont
+            global.set $async_cont_ptr
+
+            i64.const -2
+          else
+            local.get $__ffi_result
+          end
+        end
+      )
+
+      (func $__resume (export "__resume") (param $value i64) (result i64)
+        (local $func_idx i32)
+        local.get $value
+        global.set $__async_resume_value
+        i32.const 1
+        global.set $__async_resuming
+
+        ;; Corrupt k_ptr to verify it gets restored
+        i32.const 9999
+        global.set $k_ptr
+
+        global.get $async_cont_ptr
+        i32.load offset=32
+        local.set $func_idx
+        local.get $func_idx
+        call_indirect (type $fn_type)
+      )
+    )`;
+
+    const imports: WebAssembly.Imports = {
+      ffi: {
+        async_op: () => -2n,  // Always yield
+      },
+    };
+
+    const instance = await instantiateWatWithImports(wat, imports);
+    const setupKstack = instance.exports['setup_kstack'] as () => void;
+    const mainFunc = instance.exports['main_func'] as () => bigint;
+    const resume = instance.exports['__resume'] as (value: bigint) => bigint;
+    const kPtr = instance.exports['k_ptr'] as WebAssembly.Global;
+
+    // Setup K-stack pointer
+    setupKstack();
+    assert.strictEqual(kPtr.value, 2000, 'K-stack should be at 2000');
+
+    // Call main - should yield and save k_ptr
+    const result1 = mainFunc();
+    assert.strictEqual(result1, -2n, 'Should yield');
+
+    // Resume - should restore k_ptr and return it
+    const result2 = resume(42n);
+    assert.strictEqual(result2, 2000n, 'Restored k_ptr should be 2000');
+    assert.strictEqual(kPtr.value, 2000, 'Global k_ptr should be restored to 2000');
+  });
+
+  // Test that denv_ptr is correctly saved and restored
+  it('saves and restores denv_ptr across yield', async () => {
+    const wat = `(module
+      (import "ffi" "async_op" (func $async_op (result i64)))
+
+      (memory (export "memory") 1)
+      (global $heap_ptr (mut i32) (i32.const 1024))
+      (global $k_ptr (mut i32) (i32.const 0))
+      (global $denv_ptr (export "denv_ptr") (mut i32) (i32.const 0))
+      (global $async_cont_id (mut i64) (i64.const 0))
+      (global $async_cont_ptr (export "async_cont_ptr") (mut i32) (i32.const 0))
+      (global $__async_resuming (mut i32) (i32.const 0))
+      (global $__async_resume_value (mut i64) (i64.const 0))
+
+      (type $fn_type (func (result i64)))
+      (table (export "__indirect_function_table") 2 funcref)
+      (elem (i32.const 0) $nop_func $main_func)
+
+      (func $nop_func (result i64) i64.const 0)
+
+      (func $__alloc (param $size i32) (result i32)
+        (local $ptr i32)
+        global.get $heap_ptr
+        local.set $ptr
+        global.get $heap_ptr
+        local.get $size
+        i32.add
+        global.set $heap_ptr
+        local.get $ptr
+      )
+
+      (func $__alloc_async_cont (export "__alloc_async_cont")
+            (param $cont_id i64) (param $k_ptr i32) (param $denv_ptr i32)
+            (param $locals_ptr i32) (param $locals_count i32)
+            (param $func_idx i32) (param $resume_label i32) (result i32)
+        (local $ptr i32)
+        i32.const 48
+        call $__alloc
+        local.set $ptr
+
+        local.get $ptr
+        local.get $cont_id
+        i64.store offset=8
+        local.get $ptr
+        local.get $k_ptr
+        i32.store offset=16
+        local.get $ptr
+        local.get $denv_ptr
+        i32.store offset=20
+        local.get $ptr
+        local.get $func_idx
+        i32.store offset=32
+        local.get $ptr
+        local.get $resume_label
+        i32.store offset=36
+
+        local.get $ptr
+      )
+
+      ;; Setup: Create a fake denv pointer (simulating active handler)
+      (func $setup_denv (export "setup_denv")
+        i32.const 3000
+        global.set $denv_ptr
+      )
+
+      (func $main_func (export "main_func") (result i64)
+        (local $__ffi_result i64)
+
+        global.get $__async_resuming
+        if (result i64)
+          i32.const 0
+          global.set $__async_resuming
+
+          ;; Restore denv_ptr from AsyncCont
+          global.get $async_cont_ptr
+          i32.load offset=20
+          global.set $denv_ptr
+
+          ;; Return denv_ptr as result
+          global.get $denv_ptr
+          i64.extend_i32_u
+        else
+          call $async_op
+          local.set $__ffi_result
+
+          local.get $__ffi_result
+          i64.const -2
+          i64.eq
+          if (result i64)
+            global.get $async_cont_id
+            i64.const 1
+            i64.add
+            global.set $async_cont_id
+
+            global.get $async_cont_id
+            global.get $k_ptr
+            global.get $denv_ptr      ;; Save current denv_ptr (should be 3000)
+            i32.const 0
+            i32.const 0
+            i32.const 1
+            i32.const 0
+            call $__alloc_async_cont
+            global.set $async_cont_ptr
+
+            i64.const -2
+          else
+            local.get $__ffi_result
+          end
+        end
+      )
+
+      (func $__resume (export "__resume") (param $value i64) (result i64)
+        (local $func_idx i32)
+        local.get $value
+        global.set $__async_resume_value
+        i32.const 1
+        global.set $__async_resuming
+
+        ;; Corrupt denv_ptr to verify it gets restored
+        i32.const 7777
+        global.set $denv_ptr
+
+        global.get $async_cont_ptr
+        i32.load offset=32
+        local.set $func_idx
+        local.get $func_idx
+        call_indirect (type $fn_type)
+      )
+    )`;
+
+    const imports: WebAssembly.Imports = {
+      ffi: {
+        async_op: () => -2n,
+      },
+    };
+
+    const instance = await instantiateWatWithImports(wat, imports);
+    const setupDenv = instance.exports['setup_denv'] as () => void;
+    const mainFunc = instance.exports['main_func'] as () => bigint;
+    const resume = instance.exports['__resume'] as (value: bigint) => bigint;
+    const denvPtr = instance.exports['denv_ptr'] as WebAssembly.Global;
+
+    // Setup denv pointer (simulating active handler)
+    setupDenv();
+    assert.strictEqual(denvPtr.value, 3000, 'DEnv should be at 3000');
+
+    // Call main - should yield and save denv_ptr
+    const result1 = mainFunc();
+    assert.strictEqual(result1, -2n, 'Should yield');
+
+    // Resume - should restore denv_ptr
+    const result2 = resume(42n);
+    assert.strictEqual(result2, 3000n, 'Restored denv_ptr should be 3000');
+    assert.strictEqual(denvPtr.value, 3000, 'Global denv_ptr should be restored');
+  });
+
+  // Test that both k_ptr and denv_ptr are preserved together
+  it('preserves both k_ptr and denv_ptr together', async () => {
+    const wat = `(module
+      (import "ffi" "async_op" (func $async_op (result i64)))
+
+      (memory (export "memory") 1)
+      (global $heap_ptr (mut i32) (i32.const 1024))
+      (global $k_ptr (export "k_ptr") (mut i32) (i32.const 0))
+      (global $denv_ptr (export "denv_ptr") (mut i32) (i32.const 0))
+      (global $async_cont_id (mut i64) (i64.const 0))
+      (global $async_cont_ptr (export "async_cont_ptr") (mut i32) (i32.const 0))
+      (global $__async_resuming (mut i32) (i32.const 0))
+      (global $__async_resume_value (mut i64) (i64.const 0))
+
+      (type $fn_type (func (result i64)))
+      (table (export "__indirect_function_table") 2 funcref)
+      (elem (i32.const 0) $nop_func $main_func)
+
+      (func $nop_func (result i64) i64.const 0)
+
+      (func $__alloc (param $size i32) (result i32)
+        (local $ptr i32)
+        global.get $heap_ptr
+        local.set $ptr
+        global.get $heap_ptr
+        local.get $size
+        i32.add
+        global.set $heap_ptr
+        local.get $ptr
+      )
+
+      (func $__alloc_async_cont (export "__alloc_async_cont")
+            (param $cont_id i64) (param $k_ptr i32) (param $denv_ptr i32)
+            (param $locals_ptr i32) (param $locals_count i32)
+            (param $func_idx i32) (param $resume_label i32) (result i32)
+        (local $ptr i32)
+        i32.const 48
+        call $__alloc
+        local.set $ptr
+
+        local.get $ptr
+        local.get $cont_id
+        i64.store offset=8
+        local.get $ptr
+        local.get $k_ptr
+        i32.store offset=16
+        local.get $ptr
+        local.get $denv_ptr
+        i32.store offset=20
+        local.get $ptr
+        local.get $func_idx
+        i32.store offset=32
+        local.get $ptr
+        local.get $resume_label
+        i32.store offset=36
+
+        local.get $ptr
+      )
+
+      (func $setup_state (export "setup_state")
+        i32.const 2000
+        global.set $k_ptr
+        i32.const 3000
+        global.set $denv_ptr
+      )
+
+      (func $main_func (export "main_func") (result i64)
+        (local $__ffi_result i64)
+
+        global.get $__async_resuming
+        if (result i64)
+          i32.const 0
+          global.set $__async_resuming
+
+          ;; Restore both pointers
+          global.get $async_cont_ptr
+          i32.load offset=16
+          global.set $k_ptr
+          global.get $async_cont_ptr
+          i32.load offset=20
+          global.set $denv_ptr
+
+          ;; Return k_ptr + denv_ptr to verify both
+          global.get $k_ptr
+          global.get $denv_ptr
+          i32.add
+          i64.extend_i32_u
+        else
+          call $async_op
+          local.set $__ffi_result
+
+          local.get $__ffi_result
+          i64.const -2
+          i64.eq
+          if (result i64)
+            global.get $async_cont_id
+            i64.const 1
+            i64.add
+            global.set $async_cont_id
+
+            global.get $async_cont_id
+            global.get $k_ptr
+            global.get $denv_ptr
+            i32.const 0
+            i32.const 0
+            i32.const 1
+            i32.const 0
+            call $__alloc_async_cont
+            global.set $async_cont_ptr
+
+            i64.const -2
+          else
+            local.get $__ffi_result
+          end
+        end
+      )
+
+      (func $__resume (export "__resume") (param $value i64) (result i64)
+        (local $func_idx i32)
+        local.get $value
+        global.set $__async_resume_value
+        i32.const 1
+        global.set $__async_resuming
+
+        ;; Corrupt both to verify restoration
+        i32.const 0
+        global.set $k_ptr
+        i32.const 0
+        global.set $denv_ptr
+
+        global.get $async_cont_ptr
+        i32.load offset=32
+        local.set $func_idx
+        local.get $func_idx
+        call_indirect (type $fn_type)
+      )
+    )`;
+
+    const imports: WebAssembly.Imports = {
+      ffi: {
+        async_op: () => -2n,
+      },
+    };
+
+    const instance = await instantiateWatWithImports(wat, imports);
+    const setupState = instance.exports['setup_state'] as () => void;
+    const mainFunc = instance.exports['main_func'] as () => bigint;
+    const resume = instance.exports['__resume'] as (value: bigint) => bigint;
+    const kPtr = instance.exports['k_ptr'] as WebAssembly.Global;
+    const denvPtr = instance.exports['denv_ptr'] as WebAssembly.Global;
+
+    // Setup both pointers
+    setupState();
+    assert.strictEqual(kPtr.value, 2000, 'K-stack should be at 2000');
+    assert.strictEqual(denvPtr.value, 3000, 'DEnv should be at 3000');
+
+    // Call main - should yield
+    const result1 = mainFunc();
+    assert.strictEqual(result1, -2n, 'Should yield');
+
+    // Resume - should restore both pointers
+    const result2 = resume(42n);
+    assert.strictEqual(result2, 5000n, 'Sum of k_ptr + denv_ptr should be 5000');
+    assert.strictEqual(kPtr.value, 2000, 'K-stack should be restored');
+    assert.strictEqual(denvPtr.value, 3000, 'DEnv should be restored');
   });
 });
 

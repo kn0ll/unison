@@ -440,7 +440,7 @@ export function pushFrameSize(savedCount: number): number {
 // =============================================================================
 
 /** Size of an async continuation object */
-export const ASYNC_CONT_SIZE = 40;
+export const ASYNC_CONT_SIZE = 48;
 
 /** Offset of continuation ID in async cont */
 export const ASYNC_CONT_ID_OFFSET = 8;
@@ -448,20 +448,23 @@ export const ASYNC_CONT_ID_OFFSET = 8;
 /** Offset of saved K pointer in async cont */
 export const ASYNC_CONT_KPTR_OFFSET = 16;
 
+/** Offset of saved DEnv pointer in async cont */
+export const ASYNC_CONT_DENV_PTR_OFFSET = 20;
+
 /** Offset of locals pointer in async cont */
-export const ASYNC_CONT_LOCALS_PTR_OFFSET = 20;
+export const ASYNC_CONT_LOCALS_PTR_OFFSET = 24;
 
 /** Offset of locals count in async cont */
-export const ASYNC_CONT_LOCALS_COUNT_OFFSET = 24;
+export const ASYNC_CONT_LOCALS_COUNT_OFFSET = 28;
 
 /** Offset of function table index in async cont */
-export const ASYNC_CONT_FUNC_IDX_OFFSET = 28;
+export const ASYNC_CONT_FUNC_IDX_OFFSET = 32;
 
 /** Offset of resume label (yield point ID) in async cont */
-export const ASYNC_CONT_RESUME_LABEL_OFFSET = 32;
+export const ASYNC_CONT_RESUME_LABEL_OFFSET = 36;
 
 /** Offset of status field in async cont */
-export const ASYNC_CONT_STATUS_OFFSET = 36;
+export const ASYNC_CONT_STATUS_OFFSET = 40;
 
 /** Status: pending (not yet resumed) */
 export const ASYNC_STATUS_PENDING = 0;

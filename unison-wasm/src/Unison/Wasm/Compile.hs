@@ -1459,6 +1459,7 @@ ffiCallWithYieldCheckFull funcName funcTableIdx yieldPointId locals =
              -- Create AsyncCont object
              GlobalGet "async_cont_id",  -- cont_id
              GlobalGet "k_ptr",          -- k_ptr
+             GlobalGet "denv_ptr",       -- denv_ptr (for handler preservation)
              LocalGet "__async_locals_ptr",  -- locals_ptr
              I32Const (fromIntegral localsCount),  -- locals_count
              I32Const (fromIntegral funcTableIdx), -- func_idx

@@ -99,6 +99,7 @@ transformToStateMachine locals body =
 
 -- | Generate the resume dispatcher at function entry.
 -- This checks if we're resuming and sets up the state accordingly.
+-- Restores K-stack pointer, dynamic environment, and all locals.
 resumeDispatcher :: [(String, WatValType)] -> [WatInstr]
 resumeDispatcher locals =
   [ Comment "=== Resume Dispatcher ===",
@@ -108,10 +109,14 @@ resumeDispatcher locals =
           -- Clear the resuming flag
           I32Const 0,
           GlobalSet "__async_resuming",
-          -- Restore K pointer
+          -- Restore K pointer (for ability handler call stack)
           GlobalGet "async_cont_ptr",
           I32Load (fromIntegral ABI.asyncContKPtrOffset),
           GlobalSet "k_ptr",
+          -- Restore dynamic environment pointer (for handler dispatch)
+          GlobalGet "async_cont_ptr",
+          I32Load (fromIntegral ABI.asyncContDEnvPtrOffset),
+          GlobalSet "denv_ptr",
           -- Get locals pointer
           GlobalGet "async_cont_ptr",
           I32Load (fromIntegral ABI.asyncContLocalsPtrOffset),

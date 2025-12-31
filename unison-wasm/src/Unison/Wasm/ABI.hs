@@ -177,6 +177,7 @@ module Unison.Wasm.ABI
     asyncContSize,
     asyncContIdOffset,
     asyncContKPtrOffset,
+    asyncContDEnvPtrOffset,
     asyncContLocalsPtrOffset,
     asyncContLocalsCountOffset,
     asyncContFuncIdxOffset,
@@ -771,18 +772,20 @@ denvSize entryCount = align8 (denvBaseSize + entryCount * denvEntrySize)
 -- -----------------------------------------------------------------------------
 -- OBJ_ASYNC_CONT represents a suspended async computation.
 -- Layout:
---   bytes 0-7:   Header (ObjTag=0x00B, size=40)
+--   bytes 0-7:   Header (ObjTag=0x00B, size=48)
 --   bytes 8-15:  cont_id (i64) - unique ID for JS reference
 --   bytes 16-19: k_ptr (i32) - saved K stack pointer
---   bytes 20-23: locals_ptr (i32) - pointer to saved locals array
---   bytes 24-27: locals_count (i32) - number of saved locals
---   bytes 28-31: func_idx (i32) - function table index for call_indirect
---   bytes 32-35: resume_label (i32) - yield point ID for br_table
---   bytes 36-39: status (i32) - 0=pending, 1=resumed, 2=freed
+--   bytes 20-23: denv_ptr (i32) - saved dynamic environment pointer
+--   bytes 24-27: locals_ptr (i32) - pointer to saved locals array
+--   bytes 28-31: locals_count (i32) - number of saved locals
+--   bytes 32-35: func_idx (i32) - function table index for call_indirect
+--   bytes 36-39: resume_label (i32) - yield point ID for br_table
+--   bytes 40-43: status (i32) - 0=pending, 1=resumed, 2=freed
+--   bytes 44-47: reserved (i32) - for alignment
 
 -- | Size of an async continuation object
 asyncContSize :: Word32
-asyncContSize = 40
+asyncContSize = 48
 
 -- | Offset of continuation ID
 asyncContIdOffset :: Word32
@@ -792,25 +795,29 @@ asyncContIdOffset = 8
 asyncContKPtrOffset :: Word32
 asyncContKPtrOffset = 16
 
+-- | Offset of saved dynamic environment pointer
+asyncContDEnvPtrOffset :: Word32
+asyncContDEnvPtrOffset = 20
+
 -- | Offset of saved locals pointer
 asyncContLocalsPtrOffset :: Word32
-asyncContLocalsPtrOffset = 20
+asyncContLocalsPtrOffset = 24
 
 -- | Offset of saved locals count
 asyncContLocalsCountOffset :: Word32
-asyncContLocalsCountOffset = 24
+asyncContLocalsCountOffset = 28
 
 -- | Offset of function table index
 asyncContFuncIdxOffset :: Word32
-asyncContFuncIdxOffset = 28
+asyncContFuncIdxOffset = 32
 
 -- | Offset of resume label (yield point ID)
 asyncContResumeLabelOffset :: Word32
-asyncContResumeLabelOffset = 32
+asyncContResumeLabelOffset = 36
 
 -- | Offset of status field
 asyncContStatusOffset :: Word32
-asyncContStatusOffset = 36
+asyncContStatusOffset = 40
 
 -- | Status: pending (not yet resumed)
 asyncStatusPending :: Word32

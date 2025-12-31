@@ -618,9 +618,10 @@ mkFuncType arity =
       funcTypeResults = [I64]
     }
 
--- | All runtime function types (arity 1 through maxSupportedArity)
+-- | All runtime function types (arity 0 through maxSupportedArity)
+-- Arity 0 is used for async resume (call_indirect with no params)
 runtimeFuncTypes :: [WatFuncType]
-runtimeFuncTypes = map mkFuncType [1 .. maxSupportedArity]
+runtimeFuncTypes = map mkFuncType [0 .. maxSupportedArity]
 
 -- | Runtime exports (functions that JS can call)
 -- These are exported in addition to the main entry function
@@ -990,9 +991,10 @@ runtimeFunctions =
 --------------------------------------------------------------------------------
 
 -- | Allocate an async continuation object:
--- @__alloc_async_cont(cont_id, k_ptr, locals_ptr, locals_count, func_idx, resume_label) -> i32@
+-- @__alloc_async_cont(cont_id, k_ptr, denv_ptr, locals_ptr, locals_count, func_idx, resume_label) -> i32@
 --
 -- Creates an OBJ_ASYNC_CONT object to store the suspended computation state.
+-- Includes the dynamic environment pointer for handler preservation across async.
 allocAsyncContFunction :: WatFunction
 allocAsyncContFunction =
   WatFunction
@@ -1000,6 +1002,7 @@ allocAsyncContFunction =
       funcParams =
         [ ("cont_id", I64),
           ("k_ptr", I32),
+          ("denv_ptr", I32),
           ("locals_ptr", I32),
           ("locals_count", I32),
           ("func_idx", I32),
@@ -1029,23 +1032,27 @@ allocAsyncContFunction =
           LocalGet "ptr",
           LocalGet "k_ptr",
           I32Store (fromIntegral ABI.asyncContKPtrOffset),
-          -- Write locals_ptr at offset 20
+          -- Write denv_ptr at offset 20
+          LocalGet "ptr",
+          LocalGet "denv_ptr",
+          I32Store (fromIntegral ABI.asyncContDEnvPtrOffset),
+          -- Write locals_ptr at offset 24
           LocalGet "ptr",
           LocalGet "locals_ptr",
           I32Store (fromIntegral ABI.asyncContLocalsPtrOffset),
-          -- Write locals_count at offset 24
+          -- Write locals_count at offset 28
           LocalGet "ptr",
           LocalGet "locals_count",
           I32Store (fromIntegral ABI.asyncContLocalsCountOffset),
-          -- Write func_idx at offset 28
+          -- Write func_idx at offset 32
           LocalGet "ptr",
           LocalGet "func_idx",
           I32Store (fromIntegral ABI.asyncContFuncIdxOffset),
-          -- Write resume_label at offset 32
+          -- Write resume_label at offset 36
           LocalGet "ptr",
           LocalGet "resume_label",
           I32Store (fromIntegral ABI.asyncContResumeLabelOffset),
-          -- Write status = PENDING at offset 36
+          -- Write status = PENDING at offset 40
           LocalGet "ptr",
           I32Const (fromIntegral ABI.asyncStatusPending),
           I32Store (fromIntegral ABI.asyncContStatusOffset),
@@ -1135,6 +1142,6 @@ resumeFunction =
           -- The function will check __async_resuming, restore locals from AsyncCont,
           -- and jump to the correct resume point
           LocalGet "func_idx",
-          CallIndirect "__fn_type"
+          CallIndirect "arity_0"  -- Entry points have no params, return i64
         ]
     }
