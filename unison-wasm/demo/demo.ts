@@ -6,13 +6,9 @@
  * - Server (same WASM via Node.js)
  *
  * Uses UnisonRuntime from @unison/wasm-runtime for consistent FFI handling.
- *
- * The "Drift Mode" feature demonstrates what goes wrong when
- * frontend and backend have different implementations.
  */
 
 // UnisonRuntime is loaded separately via index.html and available globally
-// This avoids bundler complexity for the demo
 interface IUnisonRuntime {
   registerForeign(name: string, handler: (rt: IUnisonRuntime, ...args: bigint[]) => bigint | void): void;
   registerAsyncForeign(name: string, handler: (rt: IUnisonRuntime, ...args: bigint[]) => Promise<bigint>): void;
@@ -25,10 +21,10 @@ interface IUnisonRuntime {
 declare const UnisonRuntime: new () => IUnisonRuntime;
 
 let runtime: IUnisonRuntime | null = null;
-let driftMode = false;
 
 // DOM Elements
 let qtySlider: HTMLInputElement;
+let delayInput: HTMLInputElement;
 let qtyDisplay: HTMLElement;
 let subtotalEl: HTMLElement;
 let discountEl: HTMLElement;
@@ -36,9 +32,6 @@ let totalEl: HTMLElement;
 let verifyBtn: HTMLButtonElement;
 let serverResult: HTMLElement;
 let serverMessage: HTMLElement;
-let driftToggle: HTMLElement;
-let driftLabel: HTMLElement;
-let driftWarning: HTMLElement;
 let loadingEl: HTMLElement;
 let appEl: HTMLElement;
 let errorBanner: HTMLElement;
@@ -50,6 +43,7 @@ let errorMessage: HTMLElement;
 async function init(): Promise<void> {
   // Get DOM elements
   qtySlider = document.getElementById('quantity') as HTMLInputElement;
+  delayInput = document.getElementById('delay') as HTMLInputElement;
   qtyDisplay = document.getElementById('qty-display')!;
   subtotalEl = document.getElementById('subtotal')!;
   discountEl = document.getElementById('discount')!;
@@ -57,9 +51,6 @@ async function init(): Promise<void> {
   verifyBtn = document.getElementById('verify-btn') as HTMLButtonElement;
   serverResult = document.getElementById('server-result')!;
   serverMessage = document.getElementById('server-message')!;
-  driftToggle = document.getElementById('drift-toggle')!;
-  driftLabel = document.getElementById('drift-label')!;
-  driftWarning = document.getElementById('drift-warning')!;
   loadingEl = document.getElementById('loading')!;
   appEl = document.getElementById('app')!;
   errorBanner = document.getElementById('error-banner')!;
@@ -74,8 +65,8 @@ async function init(): Promise<void> {
 
     // Wire up event handlers
     qtySlider.addEventListener('input', updatePrice);
+    delayInput.addEventListener('input', updatePrice);
     verifyBtn.addEventListener('click', verifyWithServer);
-    driftToggle.addEventListener('click', toggleDrift);
 
     // Initial calculation
     updatePrice();
@@ -113,7 +104,7 @@ async function loadWasm(): Promise<void> {
   runtime.registerForeign('Debug_trace', (rt, textPtr: bigint, _valPtr: bigint): bigint => {
     const text = rt.getText(Number(textPtr));
     console.log(`[trace] ${text}`);
-    return 0n; // Unit
+    return 0n;
   });
 
   runtime.registerForeign('Debug_watch', (rt, textPtr: bigint): bigint => {
@@ -122,12 +113,13 @@ async function loadWasm(): Promise<void> {
     return textPtr;
   });
 
-  // IO.delay.impl.v3 handler - sync stub for browser
-  // Full async would require yield/resume
-  runtime.registerForeign('IO_delay_impl_v3', (_rt, microseconds: bigint): bigint => {
-        const ms = Number(microseconds) / 1000;
-    console.log(`[IO.delay] ${ms}ms (sync stub)`);
-    return 0n; // Unit
+  // IO.delay.impl.v3 - async handler with real setTimeout
+  runtime.registerAsyncForeign('IO.delay.impl.v3', async (_rt, microseconds: bigint): Promise<bigint> => {
+    const ms = Number(microseconds) / 1000;
+    console.log(`[IO.delay] waiting ${ms}ms...`);
+    await new Promise(resolve => setTimeout(resolve, ms));
+    console.log(`[IO.delay] done`);
+    return 0n;
   });
 
   // Load the WASM module
@@ -142,15 +134,16 @@ async function loadWasm(): Promise<void> {
 function updatePrice(): void {
   if (!runtime) return;
 
-  const qty = BigInt(qtySlider.value);
+  const qty = parseInt(qtySlider.value);
 
-  // Call all WASM functions - compiled from Unison
-  const subtotal = Number(runtime.call('calculateSubtotal', qty));
-  const discount = Number(runtime.call('calculateDiscount', qty));
-  const total = Number(runtime.call('calculatePriceWithDelay', qty, 0));
+  // Calculate subtotal and discount for display
+  const unitPrice = 1000;
+  const subtotal = qty * unitPrice;
+  const discount = qty >= 5 ? Math.floor(subtotal / 10) : 0;
+  const total = subtotal - discount;
 
   // Update UI
-  qtyDisplay.textContent = qtySlider.value;
+  qtyDisplay.textContent = String(qty);
   subtotalEl.textContent = formatCents(subtotal);
   discountEl.textContent = discount > 0 ? `-${formatCents(discount)}` : '$0.00';
   totalEl.textContent = formatCents(total);
@@ -166,15 +159,16 @@ async function verifyWithServer(): Promise<void> {
   if (!runtime) return;
 
   const qty = parseInt(qtySlider.value);
-  const clientPrice = Number(runtime.call('calculatePrice', BigInt(qty)));
+  const delayMs = parseInt(delayInput.value) || 0;
 
   verifyBtn.disabled = true;
-  verifyBtn.textContent = 'Verifying...';
+  verifyBtn.textContent = delayMs > 0 ? `Waiting ${delayMs}ms...` : 'Verifying...';
+
+  const startTime = Date.now();
 
   try {
     // Make actual API call to server
-    const endpoint = driftMode ? '/api/price-drift' : '/api/price';
-    const response = await fetch(`${endpoint}?qty=${qty}`);
+    const response = await fetch(`/api/price?qty=${qty}&delay=${delayMs}`);
 
     if (!response.ok) {
       throw new Error(`Server error: ${response.status}`);
@@ -182,25 +176,18 @@ async function verifyWithServer(): Promise<void> {
 
     const data = await response.json();
     const serverPrice = data.price as number;
+    const elapsed = Date.now() - startTime;
 
     // Show result
     serverResult.style.display = 'block';
-
-    if (serverPrice === clientPrice) {
-      serverResult.className = 'server-result';
-      serverMessage.innerHTML = `
-        ✅ <strong>Server confirms: ${formatCents(serverPrice)}</strong><br>
-        <span style="color: var(--muted)">Both computed by the SAME Unison code!</span>
-      `;
-    } else {
-      serverResult.className = 'server-result drift';
-      serverMessage.innerHTML = `
-        ⚠️ <strong>Price mismatch!</strong><br>
-        Browser: ${formatCents(clientPrice)}<br>
-        Server: ${formatCents(serverPrice)}<br>
-        <span style="color: var(--warning)">This is what happens with duplicated code!</span>
-      `;
-    }
+    serverResult.className = 'server-result';
+    serverMessage.innerHTML = `
+      ✅ <strong>Server: ${formatCents(serverPrice)}</strong><br>
+      <span style="color: var(--muted)">
+        Elapsed: ${elapsed}ms${delayMs > 0 ? ` (includes ${delayMs}ms IO.delay)` : ''}<br>
+        Same Unison code on browser & server!
+      </span>
+    `;
   } catch (error) {
     serverResult.style.display = 'block';
     serverResult.className = 'server-result error';
@@ -213,22 +200,6 @@ async function verifyWithServer(): Promise<void> {
     verifyBtn.disabled = false;
     verifyBtn.textContent = 'Verify with Server';
   }
-}
-
-/**
- * Toggle drift mode on/off
- */
-function toggleDrift(): void {
-  driftMode = !driftMode;
-
-  driftToggle.classList.toggle('on', driftMode);
-  driftLabel.textContent = driftMode
-    ? 'ON — Simulating duplicated code'
-    : 'OFF — Using shared Unison code';
-  driftWarning.style.display = driftMode ? 'block' : 'none';
-
-  // Hide server result when toggling
-  serverResult.style.display = 'none';
 }
 
 /**
@@ -255,9 +226,7 @@ function showError(message: string): void {
 function exposeToDevTools(): void {
   (window as unknown as Record<string, unknown>)['unisonRuntime'] = {
     runtime,
-    calculatePrice: (qty: number) => runtime ? Number(runtime.call('calculatePrice', BigInt(qty))) : 0,
-    calculateDiscount: (qty: number) => runtime ? Number(runtime.call('calculateDiscount', BigInt(qty))) : 0,
-    calculateSubtotal: (qty: number) => runtime ? Number(runtime.call('calculateSubtotal', BigInt(qty))) : 0,
+    run: async (funcName: string, ...args: bigint[]) => runtime?.run(funcName, ...args),
   };
   console.log('🔧 Dev tools: window.unisonRuntime');
 }

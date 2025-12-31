@@ -65,6 +65,23 @@
       height: 8px;
     }
 
+    input[type="number"] {
+      background: var(--bg);
+      border: 1px solid var(--muted);
+      border-radius: 6px;
+      color: var(--text);
+      font-family: inherit;
+      font-size: 1rem;
+      padding: 0.5rem;
+      width: 100px;
+      text-align: right;
+    }
+
+    input[type="number"]:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
     .quantity-display {
       font-size: 2rem;
       font-weight: bold;
@@ -137,11 +154,6 @@
       border-color: #ef4444;
     }
 
-    .server-result.drift {
-      background: rgba(251, 191, 36, 0.1);
-      border-color: var(--warning);
-    }
-
     .code-block {
       background: #0d1117;
       border-radius: 8px;
@@ -157,40 +169,20 @@
     .code-block .comment { color: #8b949e; }
     .code-block .type { color: #7ee787; }
 
-    .toggle-container {
+    .input-row {
       display: flex;
       align-items: center;
       gap: 1rem;
+      margin-bottom: 1rem;
     }
 
-    .toggle {
-      position: relative;
-      width: 60px;
-      height: 30px;
-      background: #333;
-      border-radius: 15px;
-      cursor: pointer;
-      transition: background 0.3s;
+    .input-row label {
+      color: var(--muted);
+      min-width: 80px;
     }
 
-    .toggle.on { background: var(--warning); }
-
-    .toggle::after {
-      content: '';
-      position: absolute;
-      width: 26px;
-      height: 26px;
-      background: white;
-      border-radius: 50%;
-      top: 2px;
-      left: 2px;
-      transition: left 0.3s;
-    }
-
-    .toggle.on::after { left: 32px; }
-
-    .warning-text {
-      color: var(--warning);
+    .input-row .unit {
+      color: var(--muted);
       font-size: 0.9rem;
     }
 
@@ -271,6 +263,12 @@
         <span class="quantity-display" id="qty-display">5</span>
       </div>
 
+      <div class="input-row">
+        <label>Delay:</label>
+        <input type="number" id="delay" min="0" max="10000" value="0" step="100">
+        <span class="unit">ms</span>
+      </div>
+
       <div class="price-breakdown">
         <div class="price-row">
           <span class="label">Unit Price</span>
@@ -293,6 +291,9 @@
 
     <div class="card">
       <h2>Server Verification</h2>
+      <p style="color: var(--muted); font-size: 0.9rem; margin-bottom: 1rem;">
+        Call the server API with the same WASM code:
+      </p>
       <button id="verify-btn">Verify with Server</button>
       <div class="server-result" id="server-result" style="display: none;">
         <span id="server-message"></span>
@@ -305,31 +306,13 @@
         This exact function runs in both environments:
       </p>
       <div class="code-block">
-<span class="function">calculatePrice</span> : <span class="type">Nat</span> -> <span class="type">Nat</span>
-<span class="function">calculatePrice</span> quantity =
-  <span class="keyword">let</span> unitPrice = <span class="number">1000</span>  <span class="comment">-- $10.00 in cents</span>
-  <span class="keyword">let</span> subtotal = quantity * unitPrice
-  <span class="keyword">let</span> discount =
-    <span class="keyword">if</span> quantity >= <span class="number">5</span>
-    <span class="keyword">then</span> subtotal / <span class="number">10</span>  <span class="comment">-- 10% bulk discount</span>
-    <span class="keyword">else</span> <span class="number">0</span>
-  subtotal - discount
+<span class="function">calculatePriceWithDelay</span> : <span class="type">Nat</span> -> <span class="type">Nat</span> -> <span class="type">Nat</span>
+<span class="function">calculatePriceWithDelay</span> delayMicros quantity =
+  _ = <span class="function">Debug.trace</span> <span class="comment">"starting"</span> ()
+  _ = <span class="keyword">##IO.delay.impl.v3</span> delayMicros
+  _ = <span class="function">Debug.trace</span> <span class="comment">"complete"</span> ()
+  <span class="function">calculatePrice</span> quantity
       </div>
-    </div>
-
-    <div class="card">
-      <h2>⚠️ Drift Mode</h2>
-      <p style="color: var(--muted); font-size: 0.9rem; margin-bottom: 1rem;">
-        Simulate what happens when frontend and backend have different code:
-      </p>
-      <div class="toggle-container">
-        <div class="toggle" id="drift-toggle"></div>
-        <span id="drift-label">OFF — Using shared Unison code</span>
-      </div>
-      <p class="warning-text" id="drift-warning" style="display: none; margin-top: 1rem;">
-        ⚠️ Drift mode: Server uses 15% discount instead of 10%.<br>
-        This simulates the bugs that happen with duplicated code!
-      </p>
     </div>
   </div>
 
@@ -347,4 +330,3 @@
   <script type="module" src="./dist/demo.js"></script>
 </body>
 </html>
-
