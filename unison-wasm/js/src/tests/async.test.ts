@@ -1888,3 +1888,417 @@ describe('Phase 4: K-Stack Integration', () => {
   });
 });
 
+// =============================================================================
+// Phase 5: Error Handling Tests
+// =============================================================================
+
+describe('Phase 5: Error Handling', () => {
+  // Test that double-resume throws ContinuationConsumedError
+  it('double-resume throws ContinuationConsumedError', async () => {
+    // ContinuationHandle enforces exactly-once resumption
+    const { ContinuationHandle, ContinuationConsumedError } = await import('../continuation.js');
+
+    // Create a mock runtime with resumeInternal
+    let resumeCount = 0;
+    const mockRuntime = {
+      resumeInternal: () => {
+        resumeCount++;
+      },
+      resumeWithErrorInternal: () => {
+        resumeCount++;
+      },
+    };
+
+    // Create a handle
+    const handle = new ContinuationHandle(1n, mockRuntime as any);
+
+    // First resume should succeed
+    handle.resume(42n);
+    assert.strictEqual(resumeCount, 1, 'First resume should call internal');
+    assert.strictEqual(handle.isConsumed, true, 'Handle should be consumed');
+
+    // Second resume should throw
+    assert.throws(
+      () => handle.resume(100n),
+      (err: Error) => {
+        return (
+          err instanceof ContinuationConsumedError && err.contId === 1n
+        );
+      },
+      'Second resume should throw ContinuationConsumedError'
+    );
+
+    // Count should still be 1
+    assert.strictEqual(resumeCount, 1, 'Internal should not be called on double-resume');
+  });
+
+  // Test that resumeWithError also enforces exactly-once
+  it('resumeWithError after resume throws ContinuationConsumedError', async () => {
+    const { ContinuationHandle, ContinuationConsumedError } = await import('../continuation.js');
+
+    let resumeCount = 0;
+    const mockRuntime = {
+      resumeInternal: () => {
+        resumeCount++;
+      },
+      resumeWithErrorInternal: () => {
+        resumeCount++;
+      },
+    };
+
+    const handle = new ContinuationHandle(2n, mockRuntime as any);
+
+    // Resume with value first
+    handle.resume(42n);
+    assert.strictEqual(resumeCount, 1);
+
+    // Then try to resume with error - should throw
+    assert.throws(
+      () => handle.resumeWithError(new Error('test')),
+      (err: Error) => err instanceof ContinuationConsumedError,
+      'resumeWithError after resume should throw'
+    );
+  });
+
+  // Test that WASM validates continuation status
+  it('WASM traps on double-resume via status check', async () => {
+    const wat = `(module
+      (memory (export "memory") 1)
+      (global $heap_ptr (mut i32) (i32.const 1024))
+      (global $async_cont_ptr (export "async_cont_ptr") (mut i32) (i32.const 0))
+      (global $__async_resuming (mut i32) (i32.const 0))
+      (global $__async_resume_value (mut i64) (i64.const 0))
+
+      (type $fn_type (func (result i64)))
+      (table (export "__indirect_function_table") 1 funcref)
+      (elem (i32.const 0) $dummy_func)
+
+      (func $dummy_func (result i64) i64.const 999)
+
+      (func $__alloc (param $size i32) (result i32)
+        (local $ptr i32)
+        global.get $heap_ptr
+        local.set $ptr
+        global.get $heap_ptr
+        local.get $size
+        i32.add
+        global.set $heap_ptr
+        local.get $ptr
+      )
+
+      ;; Setup: create an AsyncCont in Pending state
+      (func $setup (export "setup")
+        ;; Allocate 48 bytes for AsyncCont
+        i32.const 48
+        call $__alloc
+        global.set $async_cont_ptr
+
+        ;; Store cont_id at offset 8
+        global.get $async_cont_ptr
+        i64.const 1
+        i64.store offset=8
+
+        ;; Store status = Pending (0) at offset 40
+        global.get $async_cont_ptr
+        i32.const 0
+        i32.store offset=40
+
+        ;; Store func_idx at offset 32
+        global.get $async_cont_ptr
+        i32.const 0
+        i32.store offset=32
+      )
+
+      ;; Resume function that checks status
+      (func $__resume (export "__resume") (param $cont_id i64) (param $value i64) (result i64)
+        ;; Validate cont_id
+        global.get $async_cont_ptr
+        i64.load offset=8
+        local.get $cont_id
+        i64.ne
+        if
+          unreachable  ;; Invalid cont_id
+        end
+
+        ;; Check status is Pending (0)
+        global.get $async_cont_ptr
+        i32.load offset=40
+        if
+          unreachable  ;; Already resumed (status != 0)
+        end
+
+        ;; Mark as Resumed (1)
+        global.get $async_cont_ptr
+        i32.const 1
+        i32.store offset=40
+
+        ;; Return success
+        i64.const 42
+      )
+    )`;
+
+    const instance = await instantiateWatWithImports(wat, {});
+    const setup = instance.exports['setup'] as () => void;
+    const resume = instance.exports['__resume'] as (contId: bigint, value: bigint) => bigint;
+
+    // Setup the continuation
+    setup();
+
+    // First resume should succeed
+    const result1 = resume(1n, 100n);
+    assert.strictEqual(result1, 42n, 'First resume should succeed');
+
+    // Second resume should trap (status is now 1, not 0)
+    assert.throws(
+      () => resume(1n, 200n),
+      /unreachable/,
+      'Second resume should trap'
+    );
+  });
+
+  // Test that __resume_with_error wraps error in Left
+  it('__resume_with_error creates Left wrapper', async () => {
+    const wat = `(module
+      (memory (export "memory") 1)
+      (global $heap_ptr (mut i32) (i32.const 1024))
+      (global $async_cont_ptr (export "async_cont_ptr") (mut i32) (i32.const 0))
+      (global $__async_resuming (export "__async_resuming") (mut i32) (i32.const 0))
+      (global $__async_resume_value (export "__async_resume_value") (mut i64) (i64.const 0))
+
+      (type $fn_type (func (result i64)))
+      (table (export "__indirect_function_table") 1 funcref)
+      (elem (i32.const 0) $target_func)
+
+      (func $__alloc (export "__alloc") (param $size i32) (result i32)
+        (local $ptr i32)
+        global.get $heap_ptr
+        local.set $ptr
+        global.get $heap_ptr
+        local.get $size
+        i32.add
+        global.set $heap_ptr
+        local.get $ptr
+      )
+
+      ;; Allocate Data1 (Left wrapper): typeRef, ctorTag, field_tag, field_payload
+      (func $__alloc_data1_raw (export "__alloc_data1_raw")
+            (param $type_ref i32) (param $ctor_tag i32)
+            (param $field_tag i32) (param $field_payload i32) (result i32)
+        (local $ptr i32)
+        i32.const 32
+        call $__alloc
+        local.set $ptr
+
+        ;; Write header
+        local.get $ptr
+        i64.const 0x0002000000010000  ;; OBJ_DATA1, arity=1
+        i64.store
+
+        ;; Write typeRef at offset 8
+        local.get $ptr
+        local.get $type_ref
+        i32.store offset=8
+
+        ;; Write ctorTag at offset 12
+        local.get $ptr
+        local.get $ctor_tag
+        i32.store offset=12
+
+        ;; Write field tag at offset 16
+        local.get $ptr
+        local.get $field_tag
+        i64.extend_i32_u
+        i64.store offset=16
+
+        ;; Write field payload at offset 24
+        local.get $ptr
+        local.get $field_payload
+        i64.extend_i32_u
+        i64.store offset=24
+
+        local.get $ptr
+      )
+
+      ;; Setup AsyncCont
+      (func $setup (export "setup")
+        i32.const 48
+        call $__alloc
+        global.set $async_cont_ptr
+
+        global.get $async_cont_ptr
+        i64.const 1
+        i64.store offset=8
+
+        global.get $async_cont_ptr
+        i32.const 0
+        i32.store offset=40
+
+        global.get $async_cont_ptr
+        i32.const 0
+        i32.store offset=32
+      )
+
+      ;; Target function that returns the resume value (Left-wrapped)
+      (func $target_func (result i64)
+        global.get $__async_resume_value
+      )
+
+      ;; Resume with error: creates Left wrapper and resumes
+      (func $__resume_with_error (export "__resume_with_error")
+            (param $cont_id i64) (param $failure_ptr i64) (result i64)
+        (local $left_ptr i32)
+
+        ;; Check status
+        global.get $async_cont_ptr
+        i32.load offset=40
+        if
+          unreachable
+        end
+
+        ;; Mark as error (3)
+        global.get $async_cont_ptr
+        i32.const 3
+        i32.store offset=40
+
+        ;; Allocate Left wrapper (ctorTag=0 for Left)
+        i32.const 0  ;; typeRef
+        i32.const 0  ;; ctorTag (Left = 0)
+        i32.const 4  ;; field_tag (BOXED)
+        local.get $failure_ptr
+        i32.wrap_i64
+        call $__alloc_data1_raw
+        local.set $left_ptr
+
+        ;; Set as resume value
+        local.get $left_ptr
+        i64.extend_i32_u
+        global.set $__async_resume_value
+
+        ;; Set resuming flag and call target
+        i32.const 1
+        global.set $__async_resuming
+
+        global.get $async_cont_ptr
+        i32.load offset=32
+        call_indirect (type $fn_type)
+      )
+    )`;
+
+    const instance = await instantiateWatWithImports(wat, {});
+    const memory = instance.exports['memory'] as WebAssembly.Memory;
+    const setup = instance.exports['setup'] as () => void;
+    const resumeWithError = instance.exports['__resume_with_error'] as (
+      contId: bigint,
+      failurePtr: bigint
+    ) => bigint;
+    const asyncContPtr = instance.exports['async_cont_ptr'] as WebAssembly.Global;
+
+    // Setup
+    setup();
+
+    // Simulate a failure pointer (just use an address)
+    const failurePtr = 2000n;
+
+    // Call resume_with_error
+    const result = resumeWithError(1n, failurePtr);
+
+    // Result should be a pointer to the Left wrapper
+    const view = new DataView(memory.buffer);
+
+    // Read the Left object (result is the pointer)
+    const leftPtr = Number(result);
+    assert.ok(leftPtr > 1024, 'Left pointer should be in heap');
+
+    // Check ctorTag at offset 12 (should be 0 for Left)
+    const ctorTag = view.getUint32(leftPtr + 12, true);
+    assert.strictEqual(ctorTag, 0, 'CtorTag should be 0 (Left)');
+
+    // Check field payload at offset 24 (should be our failure pointer)
+    const fieldPayload = view.getBigUint64(leftPtr + 24, true);
+    assert.strictEqual(fieldPayload, failurePtr, 'Field should contain failure pointer');
+
+    // Check status is now Error (3)
+    const status = view.getUint32(asyncContPtr.value + 40, true);
+    assert.strictEqual(status, 3, 'Status should be Error (3)');
+  });
+
+  // Test async status enum values
+  it('async status constants are correct', async () => {
+    const {
+      ASYNC_STATUS_PENDING,
+      ASYNC_STATUS_RESUMED,
+      ASYNC_STATUS_FREED,
+      ASYNC_STATUS_ERROR,
+    } = await import('../abi-constants.js');
+
+    assert.strictEqual(ASYNC_STATUS_PENDING, 0, 'PENDING = 0');
+    assert.strictEqual(ASYNC_STATUS_RESUMED, 1, 'RESUMED = 1');
+    assert.strictEqual(ASYNC_STATUS_FREED, 2, 'FREED = 2');
+    assert.strictEqual(ASYNC_STATUS_ERROR, 3, 'ERROR = 3');
+  });
+
+  // Test InvalidContinuationError for wrong cont_id
+  it('wrong continuation ID causes trap', async () => {
+    const wat = `(module
+      (memory (export "memory") 1)
+      (global $heap_ptr (mut i32) (i32.const 1024))
+      (global $async_cont_ptr (export "async_cont_ptr") (mut i32) (i32.const 0))
+
+      (func $__alloc (param $size i32) (result i32)
+        (local $ptr i32)
+        global.get $heap_ptr
+        local.set $ptr
+        global.get $heap_ptr
+        local.get $size
+        i32.add
+        global.set $heap_ptr
+        local.get $ptr
+      )
+
+      (func $setup (export "setup")
+        i32.const 48
+        call $__alloc
+        global.set $async_cont_ptr
+
+        ;; Store cont_id = 42
+        global.get $async_cont_ptr
+        i64.const 42
+        i64.store offset=8
+      )
+
+      (func $__resume (export "__resume") (param $cont_id i64) (param $value i64) (result i64)
+        ;; Validate cont_id matches
+        global.get $async_cont_ptr
+        i64.load offset=8
+        local.get $cont_id
+        i64.ne
+        if
+          unreachable  ;; Wrong cont_id
+        end
+
+        i64.const 100
+      )
+    )`;
+
+    const instance = await instantiateWatWithImports(wat, {});
+    const setup = instance.exports['setup'] as () => void;
+    const resume = instance.exports['__resume'] as (contId: bigint, value: bigint) => bigint;
+
+    setup();
+
+    // Correct cont_id should work
+    const result = resume(42n, 0n);
+    assert.strictEqual(result, 100n, 'Correct cont_id should succeed');
+
+    // Reset for next test
+    setup();
+
+    // Wrong cont_id should trap
+    assert.throws(
+      () => resume(999n, 0n),
+      /unreachable/,
+      'Wrong cont_id should trap'
+    );
+  });
+});
+

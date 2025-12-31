@@ -469,11 +469,14 @@ export const ASYNC_CONT_STATUS_OFFSET = 40;
 /** Status: pending (not yet resumed) */
 export const ASYNC_STATUS_PENDING = 0;
 
-/** Status: resumed (consumed) */
+/** Status: resumed (consumed successfully) */
 export const ASYNC_STATUS_RESUMED = 1;
 
 /** Status: freed (cleaned up) */
 export const ASYNC_STATUS_FREED = 2;
+
+/** Status: errored (resumed with error) */
+export const ASYNC_STATUS_ERROR = 3;
 
 /**
  * Magic sentinel value indicating async yield.

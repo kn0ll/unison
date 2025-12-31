@@ -534,6 +534,9 @@ export class UnisonRuntime {
    * Resume a yielded computation with an error.
    * Called by ContinuationHandle.resumeWithError().
    *
+   * This allocates a Failure object on the WASM heap and resumes with it,
+   * so the Unison code receives a `Left Failure` value.
+   *
    * @param contId - The continuation ID
    * @param error - The error to propagate
    * @internal
@@ -542,13 +545,117 @@ export class UnisonRuntime {
     // Remove from pending
     this.pendingContinuations.delete(contId);
 
-    // Propagate to run() Promise
-    this.asyncState = AsyncState.Idle;
-    if (this.rejectRun) {
-      this.rejectRun(error);
-      this.resolveRun = null;
-      this.rejectRun = null;
+    if (!this.exports) {
+      // No module loaded, just reject
+      this.asyncState = AsyncState.Idle;
+      if (this.rejectRun) {
+        this.rejectRun(error);
+        this.resolveRun = null;
+        this.rejectRun = null;
+      }
+      return;
     }
+
+    // Allocate failure on heap and call __resume_with_error
+    const resumeWithError = this.exports['__resume_with_error'] as
+      | ((contId: bigint, failurePtr: bigint) => bigint)
+      | undefined;
+
+    if (typeof resumeWithError !== 'function') {
+      // Fallback: just reject the promise
+      this.asyncState = AsyncState.Idle;
+      if (this.rejectRun) {
+        this.rejectRun(error);
+        this.resolveRun = null;
+        this.rejectRun = null;
+      }
+      return;
+    }
+
+    try {
+      // Allocate failure message as Text on heap
+      const messagePtr = this.allocText(error.message);
+
+      // Allocate Failure object: DataG with 3 fields
+      // typeLink, message, any
+      const failurePtr = this.allocFailure(0, messagePtr, 0);
+
+      this.asyncState = AsyncState.Resuming;
+
+      const result = resumeWithError(contId, BigInt(failurePtr));
+      const resultBigInt = typeof result === 'bigint' ? result : BigInt(result);
+
+      if (resultBigInt === YIELD_SENTINEL) {
+        // Yielded again
+        this.asyncState = AsyncState.Yielded;
+      } else {
+        // Final result (with error wrapped in Left)
+        this.asyncState = AsyncState.Idle;
+        if (this.resolveRun) {
+          this.resolveRun(resultBigInt);
+          this.resolveRun = null;
+          this.rejectRun = null;
+        }
+      }
+    } catch (err) {
+      this.asyncState = AsyncState.Idle;
+      if (this.rejectRun) {
+        this.rejectRun(err instanceof Error ? err : new Error(String(err)));
+        this.resolveRun = null;
+        this.rejectRun = null;
+      }
+    }
+  }
+
+  /**
+   * Allocate a Failure object on the WASM heap.
+   *
+   * Failure is a DataG with 3 fields:
+   * - typeLink: Reference (we use 0 for generic runtime error)
+   * - message: Text pointer
+   * - any: value (we use 0 for unit)
+   *
+   * @param typeLinkRef - Reference ID for the failure type (0 for generic)
+   * @param messagePtr - Pointer to Text object with error message
+   * @param anyPtr - Pointer to associated value (0 for unit)
+   * @returns Pointer to allocated Failure object
+   */
+  allocFailure(typeLinkRef: number, messagePtr: number, anyPtr: number): number {
+    if (!this.exports || !this.memory) {
+      throw new Error('No WASM module loaded');
+    }
+
+    const allocDataG = this.exports['__alloc_datag'] as
+      | ((typeRef: number, ctorTag: number, arity: number) => number)
+      | undefined;
+
+    if (typeof allocDataG !== 'function') {
+      throw new Error('__alloc_datag not available');
+    }
+
+    // Allocate DataG with 3 fields
+    // TypeRef for Failure is a placeholder (0)
+    // CtorTag is 0 (only one constructor)
+    const ptr = allocDataG(0, 0, 3);
+
+    const view = new DataView(this.memory.buffer);
+
+    // Field 0: typeLink (boxed Reference placeholder - just store as Nat for now)
+    // Offset 16: TypedSlot for field 0
+    view.setBigUint64(ptr + 16, BigInt(TYPE_NAT), true);      // TypeTag = NAT (placeholder)
+    view.setBigUint64(ptr + 24, BigInt(typeLinkRef), true);   // Payload = typeLink ref
+
+    // Field 1: message (boxed Text pointer)
+    // Offset 32: TypedSlot for field 1
+    view.setBigUint64(ptr + 32, BigInt(TYPE_BOXED), true);    // TypeTag = BOXED
+    view.setBigUint64(ptr + 40, BigInt(messagePtr), true);    // Payload = Text ptr
+
+    // Field 2: any (boxed value, use 0 for unit)
+    // Offset 48: TypedSlot for field 2
+    view.setBigUint64(ptr + 48, BigInt(TYPE_NAT), true);      // TypeTag = NAT (unit placeholder)
+    view.setBigUint64(ptr + 56, BigInt(anyPtr), true);        // Payload = value
+
+    return ptr;
   }
 
   /**

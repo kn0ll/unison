@@ -186,6 +186,7 @@ module Unison.Wasm.ABI
     asyncStatusPending,
     asyncStatusResumed,
     asyncStatusFreed,
+    asyncStatusError,
     yieldSentinel,
 
     -- * Alignment
@@ -823,13 +824,17 @@ asyncContStatusOffset = 40
 asyncStatusPending :: Word32
 asyncStatusPending = 0
 
--- | Status: resumed (consumed)
+-- | Status: resumed (consumed successfully)
 asyncStatusResumed :: Word32
 asyncStatusResumed = 1
 
 -- | Status: freed (cleaned up)
 asyncStatusFreed :: Word32
 asyncStatusFreed = 2
+
+-- | Status: errored (resumed with error)
+asyncStatusError :: Word32
+asyncStatusError = 3
 
 -- | Magic sentinel value indicating async yield
 -- When a function returns this value, it means it yielded to JS.

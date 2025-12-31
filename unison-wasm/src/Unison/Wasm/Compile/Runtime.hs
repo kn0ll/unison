@@ -28,6 +28,8 @@ module Unison.Wasm.Compile.Runtime
     mkApplyFunction,
     allocAsyncContFunction,
     resumeFunction,
+    resumeWithErrorFunction,
+    allocData1RawFunction,
 
     -- * Constants
     heapStartAddress,
@@ -626,7 +628,7 @@ runtimeFuncTypes = map mkFuncType [0 .. maxSupportedArity]
 -- | Runtime exports (functions that JS can call)
 -- These are exported in addition to the main entry function
 runtimeExports :: [String]
-runtimeExports = ["__resume"]
+runtimeExports = ["__resume", "__resume_with_error"]
 
 --------------------------------------------------------------------------------
 -- DEnv (Dynamic Handler Environment) Functions
@@ -982,7 +984,9 @@ runtimeFunctions =
     -- Async continuation functions
     allocAsyncContFunction,
     allocLocalsArrayFunction,
-    resumeFunction
+    resumeFunction,
+    resumeWithErrorFunction,
+    allocData1RawFunction
   ]
     ++ map mkApplyFunction [1 .. 3] -- Generate __apply1, __apply2, __apply3
 
@@ -1143,5 +1147,127 @@ resumeFunction =
           -- and jump to the correct resume point
           LocalGet "func_idx",
           CallIndirect "arity_0"  -- Entry points have no params, return i64
+        ]
+    }
+
+-- | Resume with error function: @__resume_with_error(cont_id, failure_ptr) -> i64@
+--
+-- Called by JS to resume a yielded computation with a Failure value.
+-- This wraps the failure in Left and resumes.
+-- The failure_ptr should point to a DataG with Failure type reference.
+resumeWithErrorFunction :: WatFunction
+resumeWithErrorFunction =
+  WatFunction
+    { funcName = "__resume_with_error",
+      funcParams = [("cont_id", I64), ("failure_ptr", I64)],
+      funcLocals = [("cont_ptr", I32), ("func_idx", I32), ("left_ptr", I32)],
+      funcResults = [I64],
+      funcBody =
+        [ Comment "Resume a suspended async computation with an error",
+          -- Get the async cont pointer from global
+          GlobalGet "async_cont_ptr",
+          LocalSet "cont_ptr",
+
+          -- Validate cont_id matches
+          LocalGet "cont_ptr",
+          I64Load (fromIntegral ABI.asyncContIdOffset),
+          LocalGet "cont_id",
+          I64Eq,
+          I32Eqz,
+          -- If mismatch, trap (invalid continuation)
+          IfVoid [Unreachable] [],
+
+          -- Check status is Pending (0)
+          LocalGet "cont_ptr",
+          I32Load (fromIntegral ABI.asyncContStatusOffset),
+          -- If not 0, trap (already resumed or freed)
+          IfVoid [Unreachable] [],
+
+          -- Mark as Error (3)
+          LocalGet "cont_ptr",
+          I32Const (fromIntegral ABI.asyncStatusError),
+          I32Store (fromIntegral ABI.asyncContStatusOffset),
+
+          -- Allocate Left wrapper: Data1 with typeRef=0, ctorTag=0 (Left), field0=failure_ptr
+          -- TypeRef 0 is placeholder for Either
+          I32Const 0,        -- typeRef (Either placeholder)
+          I32Const 0,        -- ctorTag (Left = 0)
+          I32Const (fromIntegral (ABI.typeTagToWord8 ABI.typeBoxed)), -- TypeTag for boxed
+          LocalGet "failure_ptr",
+          I32WrapI64,        -- Convert i64 ptr to i32
+          Call "__alloc_data1_raw",
+          LocalSet "left_ptr",
+
+          -- Store the Left pointer as resume value (as i64)
+          LocalGet "left_ptr",
+          I64ExtendI32U,
+          GlobalSet "__async_resume_value",
+
+          -- Set the resuming flag
+          I32Const 1,
+          GlobalSet "__async_resuming",
+
+          -- Load function index from AsyncCont
+          LocalGet "cont_ptr",
+          I32Load (fromIntegral ABI.asyncContFuncIdxOffset),
+          LocalSet "func_idx",
+
+          -- Call the suspended function via call_indirect
+          LocalGet "func_idx",
+          CallIndirect "arity_0"
+        ]
+    }
+
+-- | Allocate a Data1 object (raw version for runtime use):
+-- @__alloc_data1_raw(typeRef, ctorTag, field_tag, field_payload_low) -> i32@
+--
+-- This is a simplified version for runtime use that takes the payload directly.
+allocData1RawFunction :: WatFunction
+allocData1RawFunction =
+  WatFunction
+    { funcName = "__alloc_data1_raw",
+      funcParams = [("type_ref", I32), ("ctor_tag", I32), ("field_tag", I32), ("field_payload", I32)],
+      funcLocals = [("ptr", I32)],
+      funcResults = [I32],
+      funcBody =
+        [ Comment "Allocate OBJ_DATA1 object",
+          -- Allocate 32 bytes for Data1
+          I32Const (fromIntegral ABI.data1Size),
+          Call "__alloc",
+          LocalSet "ptr",
+
+          -- Write header: OBJ_DATA1 with arity=1
+          LocalGet "ptr",
+          I64Const (fromIntegral (ABI.objTagToWord16 ABI.objData1)),
+          I64Const 48,
+          I64Shl,
+          I64Const 1, -- Arity = 1
+          I64Or,
+          I64Store 0,
+
+          -- Write typeRef at offset 8
+          LocalGet "ptr",
+          LocalGet "type_ref",
+          I32Store (fromIntegral ABI.data1TypeRefOffset),
+
+          -- Write ctorTag at offset 12
+          LocalGet "ptr",
+          LocalGet "ctor_tag",
+          I32Store (fromIntegral ABI.data1CtorIdOffset),
+
+          -- Write field TypeTag at offset 16 (TypedSlot tag)
+          LocalGet "ptr",
+          LocalGet "field_tag",
+          I64ExtendI32U,
+          I64Store (fromIntegral ABI.data1Field0Offset),
+
+          -- Write field payload at offset 24 (TypedSlot payload)
+          LocalGet "ptr",
+          LocalGet "field_payload",
+          I64ExtendI32U,
+          I64Store (fromIntegral (ABI.data1Field0Offset + 8)),
+
+          -- Return pointer
+          LocalGet "ptr"
         ]
     }
