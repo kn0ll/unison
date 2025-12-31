@@ -691,6 +691,41 @@ export class UnisonRuntime {
   }
 
   /**
+   * Read fields from a DataG (record) object in memory.
+   * Returns an array of bigint payloads for each field.
+   *
+   * DataG layout (from Compile/Runtime.hs):
+   * - bytes 0-3: header i32 = (ObjTag << 20) | arity
+   * - bytes 4-7: padding
+   * - bytes 8-11: type_ref i32
+   * - bytes 12-13: ctor_id i16
+   * - bytes 14-15: arity i16 (redundant copy)
+   * - bytes 16+: TypedSlots (16 bytes each: 8-byte tag + 8-byte payload)
+   *
+   * @param ptr - Pointer to DataG object
+   * @returns Array of field payloads as bigints
+   */
+  readDataGFields(ptr: Ptr32): bigint[] {
+    const view = this.getMemoryView();
+    // Arity is in header at offset 0, masked from (ObjTag << 20) | arity
+    const header = view.getUint32(ptr, true);
+    const arity = header & 0xFFFFF; // Low 20 bits
+
+    const fields: bigint[] = [];
+    const fieldsStart = ptr + 16;
+
+    for (let i = 0; i < arity; i++) {
+      const fieldOffset = fieldsStart + (i * 16);
+      // Each TypedSlot is 16 bytes: 8-byte tag, 8-byte payload
+      // We skip the tag and just read the payload
+      const payload = view.getBigUint64(fieldOffset + 8, true);
+      fields.push(payload);
+    }
+
+    return fields;
+  }
+
+  /**
    * Read a UTF-8 string from a Text object in memory.
    */
   getText(ptr: Ptr32): string {

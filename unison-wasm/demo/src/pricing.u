@@ -4,42 +4,22 @@
 -- The core pricing logic is shared between environments.
 -- No duplication = no drift = no bugs.
 
--- Calculate total price in cents
+-- Price breakdown record - all values in cents
+type PriceResult = { subtotal: Nat, discount: Nat, total: Nat }
+
+-- Calculate full price breakdown
+-- @param delayMicros Delay in microseconds (for async demo)
 -- @param quantity Number of items
--- @returns Total price in cents (e.g., 4500 = $45.00)
-calculatePrice : Nat -> Nat
-calculatePrice quantity =
+-- @returns PriceResult with subtotal, discount, and total
+calculatePrice : Nat -> Nat -> PriceResult
+calculatePrice delayMicros quantity =
+  _ = Debug.trace "calculating price" ()
+  _ = ##IO.delay.impl.v3 delayMicros
+  _ = Debug.trace "calculation complete" ()
+  
   unitPrice = 1000  -- $10.00 in cents
   subtotal = quantity * unitPrice
   discount = if quantity >= 5 then subtotal / 10 else 0
-  subtotal - discount
-
--- Calculate just the discount amount in cents
--- @param quantity Number of items
--- @returns Discount in cents (e.g., 500 = $5.00)
-calculateDiscount : Nat -> Nat
-calculateDiscount quantity =
-  unitPrice = 1000
-  subtotal = quantity * unitPrice
-  if quantity >= 5 then subtotal / 10 else 0
-
--- Calculate subtotal before discount
--- @param quantity Number of items
--- @returns Subtotal in cents
-calculateSubtotal : Nat -> Nat
-calculateSubtotal quantity = quantity * 1000
-
--- Check if bulk discount applies
--- @param quantity Number of items
--- @returns True if quantity >= 5
-hasBulkDiscount : Nat -> Boolean
-hasBulkDiscount quantity = quantity >= 5
-
--- Calculate price with delay (demonstrates async FFI)
--- Uses ##IO.delay.impl.v3 raw builtin
-calculatePriceWithDelay : Nat -> Nat -> Nat
-calculatePriceWithDelay delayMicros quantity =
-  _ = Debug.trace "starting delayed calculation" ()
-  _ = ##IO.delay.impl.v3 delayMicros
-  _ = Debug.trace "delay complete" ()
-  calculatePrice quantity
+  total = subtotal - discount
+  
+  PriceResult subtotal discount total

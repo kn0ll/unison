@@ -16,6 +16,14 @@ interface IUnisonRuntime {
   call(funcName: string, ...args: unknown[]): unknown;
   run(funcName: string, ...args: unknown[]): Promise<bigint>;
   getText(ptr: number): string;
+  readDataGFields(ptr: number): bigint[];
+}
+
+// PriceResult from Unison: { subtotal: Nat, discount: Nat, total: Nat }
+interface PriceResult {
+  subtotal: number;
+  discount: number;
+  total: number;
 }
 
 declare const UnisonRuntime: new () => IUnisonRuntime;
@@ -129,26 +137,44 @@ async function loadWasm(): Promise<void> {
 }
 
 /**
- * Update the price display based on current quantity
- * Calls the actual Unison WASM functions - no JS duplication!
+ * Parse a PriceResult from WASM heap pointer.
+ * PriceResult = { subtotal: Nat, discount: Nat, total: Nat }
+ */
+function parsePriceResult(ptr: bigint): PriceResult {
+  if (!runtime) throw new Error('Runtime not loaded');
+  const fields = runtime.readDataGFields(Number(ptr));
+  return {
+    subtotal: Number(fields[0]),
+    discount: Number(fields[1]),
+    total: Number(fields[2]),
+  };
+}
+
+/**
+ * Update the price display based on current quantity.
+ * Calls the Unison WASM function - no JS duplication!
  */
 async function updatePrice(): Promise<void> {
   if (!runtime) return;
 
   const qty = parseInt(qtySlider.value);
+  const delayMs = parseInt(delayInput.value) || 0;
+  const delayMicros = BigInt(delayMs * 1000);
 
   // Update quantity display immediately
   qtyDisplay.textContent = String(qty);
 
-  // Call ALL Unison WASM functions - no JS duplication!
-  const subtotal = Number(runtime.call('calculateSubtotal', BigInt(qty)));
-  const discount = Number(runtime.call('calculateDiscount', BigInt(qty)));
-  const price = Number(runtime.call('calculatePrice', BigInt(qty)));
+  // Call the actual Unison WASM function!
+  // calculatePrice(delayMicros, quantity) -> PriceResult
+  const resultPtr = await runtime.run('calculatePrice', delayMicros, BigInt(qty));
 
-  // Update UI with values from WASM
-  subtotalEl.textContent = formatCents(subtotal);
-  discountEl.textContent = discount > 0 ? `-${formatCents(discount)}` : '$0.00';
-  totalEl.textContent = formatCents(price);
+  // Parse the PriceResult record from WASM heap
+  const result = parsePriceResult(resultPtr);
+
+  // Update UI - no duplicated logic, straight from Unison!
+  subtotalEl.textContent = formatCents(result.subtotal);
+  discountEl.textContent = result.discount > 0 ? `-${formatCents(result.discount)}` : '$0.00';
+  totalEl.textContent = formatCents(result.total);
 
   // Hide previous server result
   serverResult.style.display = 'none';

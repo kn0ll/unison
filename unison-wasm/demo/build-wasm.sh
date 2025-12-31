@@ -38,18 +38,18 @@ unison transcript --save-codebase-to "$CODEBASE_DIR" setup-codebase.md >/dev/nul
 
 cd "$WASM_DIR"
 
-# Compile all pricing functions from codebase
-echo "  Compiling pricing functions from codebase..."
+# Compile calculatePrice from codebase
+echo "  Compiling calculatePrice from codebase..."
 LANG=C.UTF-8 LC_ALL=C.UTF-8 stack exec unison-wasm-poc -- \
     compile-codebase \
     --codebase "$CODEBASE_DIR" \
     --project demo \
     --branch main \
-    calculatePrice calculateDiscount calculateSubtotal calculatePriceWithDelay > "$DIST_DIR/pricing.wat" || {
+    calculatePrice > "$DIST_DIR/pricing.wat" || {
   echo "Error: Compilation failed"
   exit 1
 }
-echo "  ✓ Compiled pricing functions to $DIST_DIR/pricing.wat"
+echo "  ✓ Compiled calculatePrice to $DIST_DIR/pricing.wat"
 
 # Convert WAT to WASM binary (if wat2wasm available)
 if command -v wat2wasm &>/dev/null; then
