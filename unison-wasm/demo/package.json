@@ -4,10 +4,8 @@
   "description": "Unison WASM Demo - Price Calculator showing one-program fullstack",
   "type": "module",
   "scripts": {
-    "build:codebase": "bash build-codebase.sh",
-    "build:wasm": "bash build-wasm.sh",
     "build:ts": "tsc",
-    "build": "npm run build:codebase && npm run build:wasm && npm run build:ts && cp index.html dist/index.html",
+    "build": "bash scripts/setup.sh && bash scripts/build-codebase.sh && bash scripts/compile-codebase.sh && bash scripts/generate-types.sh && npm run build:ts && cp index.html dist/index.html",
     "serve:static": "npx serve . -l 3000",
     "server": "node dist/server.js",
     "dev": "npm run build && npm run server",

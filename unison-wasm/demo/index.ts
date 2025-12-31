@@ -10,7 +10,7 @@
  * - ./dist/pricing.d.ts (generated FunctionSignatures augmentation)
  */
 
-/// <reference path="./dist/pricing.d.ts" />
+/// <reference path="./dist/bundle.d.ts" />
 import type { UnisonRuntime as IUnisonRuntime, FunctionSignatures } from '@unison/wasm-runtime';
 
 // UnisonRuntime constructor is available globally (loaded via script tag)
