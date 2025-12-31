@@ -440,7 +440,7 @@ export function pushFrameSize(savedCount: number): number {
 // =============================================================================
 
 /** Size of an async continuation object */
-export const ASYNC_CONT_SIZE = 48;
+export const ASYNC_CONT_SIZE = 56;
 
 /** Offset of continuation ID in async cont */
 export const ASYNC_CONT_ID_OFFSET = 8;
@@ -466,6 +466,9 @@ export const ASYNC_CONT_RESUME_LABEL_OFFSET = 36;
 /** Offset of status field in async cont */
 export const ASYNC_CONT_STATUS_OFFSET = 40;
 
+/** Offset of arity (number of function parameters) in async cont */
+export const ASYNC_CONT_ARITY_OFFSET = 44;
+
 /** Status: pending (not yet resumed) */
 export const ASYNC_STATUS_PENDING = 0;
 
@@ -482,5 +485,9 @@ export const ASYNC_STATUS_ERROR = 3;
  * Magic sentinel value indicating async yield.
  * When a function returns this value, it means it yielded to JS.
  * Uses a value that cannot be a valid Nat/Int/pointer.
+ *
+ * Note: WASM returns i64 as signed, so this may appear as -2n.
+ * We use the signed representation for comparison since that's what
+ * JavaScript receives from WebAssembly.
  */
-export const YIELD_SENTINEL = 0xffff_ffff_ffff_fffen;
+export const YIELD_SENTINEL = -2n;

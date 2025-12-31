@@ -995,10 +995,11 @@ runtimeFunctions =
 --------------------------------------------------------------------------------
 
 -- | Allocate an async continuation object:
--- @__alloc_async_cont(cont_id, k_ptr, denv_ptr, locals_ptr, locals_count, func_idx, resume_label) -> i32@
+-- @__alloc_async_cont(cont_id, k_ptr, denv_ptr, locals_ptr, locals_count, func_idx, resume_label, arity) -> i32@
 --
 -- Creates an OBJ_ASYNC_CONT object to store the suspended computation state.
 -- Includes the dynamic environment pointer for handler preservation across async.
+-- Includes function arity for call_indirect type dispatch when resuming.
 allocAsyncContFunction :: WatFunction
 allocAsyncContFunction =
   WatFunction
@@ -1010,7 +1011,8 @@ allocAsyncContFunction =
           ("locals_ptr", I32),
           ("locals_count", I32),
           ("func_idx", I32),
-          ("resume_label", I32)
+          ("resume_label", I32),
+          ("arity", I32)
         ],
       funcLocals = [("ptr", I32)],
       funcResults = [I32],
@@ -1060,6 +1062,10 @@ allocAsyncContFunction =
           LocalGet "ptr",
           I32Const (fromIntegral ABI.asyncStatusPending),
           I32Store (fromIntegral ABI.asyncContStatusOffset),
+          -- Write arity at offset 44
+          LocalGet "ptr",
+          LocalGet "arity",
+          I32Store (fromIntegral ABI.asyncContArityOffset),
           -- Return ptr
           LocalGet "ptr"
         ]
@@ -1095,13 +1101,13 @@ allocLocalsArrayFunction =
 -- 2. Loads the saved state from the async cont object into globals
 -- 3. Sets the __async_resuming flag
 -- 4. Stores the resume value in __async_resume_value
--- 5. Calls the suspended function via call_indirect
+-- 5. Dispatches to call_indirect with correct arity based on saved arity
 resumeFunction :: WatFunction
 resumeFunction =
   WatFunction
     { funcName = "__resume",
       funcParams = [("cont_id", I64), ("value", I64)],
-      funcLocals = [("cont_ptr", I32), ("func_idx", I32)],
+      funcLocals = [("cont_ptr", I32), ("func_idx", I32), ("arity", I32)],
       funcResults = [I64],
       funcBody =
         [ Comment "Resume a suspended async computation",
@@ -1137,16 +1143,91 @@ resumeFunction =
           I32Const 1,
           GlobalSet "__async_resuming",
 
-          -- Load function index from AsyncCont
+          -- Load function index and arity from AsyncCont
           LocalGet "cont_ptr",
           I32Load (fromIntegral ABI.asyncContFuncIdxOffset),
           LocalSet "func_idx",
 
-          -- Call the suspended function via call_indirect
-          -- The function will check __async_resuming, restore locals from AsyncCont,
-          -- and jump to the correct resume point
-          LocalGet "func_idx",
-          CallIndirect "arity_0"  -- Entry points have no params, return i64
+          LocalGet "cont_ptr",
+          I32Load (fromIntegral ABI.asyncContArityOffset),
+          LocalSet "arity",
+
+          -- Dispatch call_indirect based on arity
+          -- All params are dummy values (0); the function will restore from saved locals
+          Comment "Dispatch call_indirect based on arity",
+          LocalGet "arity",
+          I32Const 1,
+          I32Eq,
+          If I64
+            -- Arity 1: pass one dummy param
+            [ I64Const 0,
+              LocalGet "func_idx",
+              CallIndirect "arity_1"
+            ]
+            -- Check for arity 2
+            [ LocalGet "arity",
+              I32Const 2,
+              I32Eq,
+              If I64
+                -- Arity 2: pass two dummy params
+                [ I64Const 0,
+                  I64Const 0,
+                  LocalGet "func_idx",
+                  CallIndirect "arity_2"
+                ]
+                -- Check for arity 3
+                [ LocalGet "arity",
+                  I32Const 3,
+                  I32Eq,
+                  If I64
+                    -- Arity 3
+                    [ I64Const 0,
+                      I64Const 0,
+                      I64Const 0,
+                      LocalGet "func_idx",
+                      CallIndirect "arity_3"
+                    ]
+                    -- Check for arity 4
+                    [ LocalGet "arity",
+                      I32Const 4,
+                      I32Eq,
+                      If I64
+                        -- Arity 4
+                        [ I64Const 0,
+                          I64Const 0,
+                          I64Const 0,
+                          I64Const 0,
+                          LocalGet "func_idx",
+                          CallIndirect "arity_4"
+                        ]
+                        -- Check for arity 5
+                        [ LocalGet "arity",
+                          I32Const 5,
+                          I32Eq,
+                          If I64
+                            -- Arity 5
+                            [ I64Const 0,
+                              I64Const 0,
+                              I64Const 0,
+                              I64Const 0,
+                              I64Const 0,
+                              LocalGet "func_idx",
+                              CallIndirect "arity_5"
+                            ]
+                            -- Default: arity 6
+                            [ I64Const 0,
+                              I64Const 0,
+                              I64Const 0,
+                              I64Const 0,
+                              I64Const 0,
+                              I64Const 0,
+                              LocalGet "func_idx",
+                              CallIndirect "arity_6"
+                            ]
+                        ]
+                    ]
+                ]
+            ]
         ]
     }
 
@@ -1160,7 +1241,7 @@ resumeWithErrorFunction =
   WatFunction
     { funcName = "__resume_with_error",
       funcParams = [("cont_id", I64), ("failure_ptr", I64)],
-      funcLocals = [("cont_ptr", I32), ("func_idx", I32), ("left_ptr", I32)],
+      funcLocals = [("cont_ptr", I32), ("func_idx", I32), ("arity", I32), ("left_ptr", I32)],
       funcResults = [I64],
       funcBody =
         [ Comment "Resume a suspended async computation with an error",
@@ -1207,14 +1288,80 @@ resumeWithErrorFunction =
           I32Const 1,
           GlobalSet "__async_resuming",
 
-          -- Load function index from AsyncCont
+          -- Load function index and arity from AsyncCont
           LocalGet "cont_ptr",
           I32Load (fromIntegral ABI.asyncContFuncIdxOffset),
           LocalSet "func_idx",
 
-          -- Call the suspended function via call_indirect
-          LocalGet "func_idx",
-          CallIndirect "arity_0"
+          LocalGet "cont_ptr",
+          I32Load (fromIntegral ABI.asyncContArityOffset),
+          LocalSet "arity",
+
+          -- Dispatch call_indirect based on arity
+          Comment "Dispatch call_indirect based on arity",
+          LocalGet "arity",
+          I32Const 1,
+          I32Eq,
+          If I64
+            [ I64Const 0,
+              LocalGet "func_idx",
+              CallIndirect "arity_1"
+            ]
+            [ LocalGet "arity",
+              I32Const 2,
+              I32Eq,
+              If I64
+                [ I64Const 0,
+                  I64Const 0,
+                  LocalGet "func_idx",
+                  CallIndirect "arity_2"
+                ]
+                [ LocalGet "arity",
+                  I32Const 3,
+                  I32Eq,
+                  If I64
+                    [ I64Const 0,
+                      I64Const 0,
+                      I64Const 0,
+                      LocalGet "func_idx",
+                      CallIndirect "arity_3"
+                    ]
+                    [ LocalGet "arity",
+                      I32Const 4,
+                      I32Eq,
+                      If I64
+                        [ I64Const 0,
+                          I64Const 0,
+                          I64Const 0,
+                          I64Const 0,
+                          LocalGet "func_idx",
+                          CallIndirect "arity_4"
+                        ]
+                        [ LocalGet "arity",
+                          I32Const 5,
+                          I32Eq,
+                          If I64
+                            [ I64Const 0,
+                              I64Const 0,
+                              I64Const 0,
+                              I64Const 0,
+                              I64Const 0,
+                              LocalGet "func_idx",
+                              CallIndirect "arity_5"
+                            ]
+                            [ I64Const 0,
+                              I64Const 0,
+                              I64Const 0,
+                              I64Const 0,
+                              I64Const 0,
+                              I64Const 0,
+                              LocalGet "func_idx",
+                              CallIndirect "arity_6"
+                            ]
+                        ]
+                    ]
+                ]
+            ]
         ]
     }
 

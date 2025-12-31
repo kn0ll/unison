@@ -183,6 +183,7 @@ module Unison.Wasm.ABI
     asyncContFuncIdxOffset,
     asyncContResumeLabelOffset,
     asyncContStatusOffset,
+    asyncContArityOffset,
     asyncStatusPending,
     asyncStatusResumed,
     asyncStatusFreed,
@@ -773,7 +774,7 @@ denvSize entryCount = align8 (denvBaseSize + entryCount * denvEntrySize)
 -- -----------------------------------------------------------------------------
 -- OBJ_ASYNC_CONT represents a suspended async computation.
 -- Layout:
---   bytes 0-7:   Header (ObjTag=0x00B, size=48)
+--   bytes 0-7:   Header (ObjTag=0x00B, size=56)
 --   bytes 8-15:  cont_id (i64) - unique ID for JS reference
 --   bytes 16-19: k_ptr (i32) - saved K stack pointer
 --   bytes 20-23: denv_ptr (i32) - saved dynamic environment pointer
@@ -781,12 +782,13 @@ denvSize entryCount = align8 (denvBaseSize + entryCount * denvEntrySize)
 --   bytes 28-31: locals_count (i32) - number of saved locals
 --   bytes 32-35: func_idx (i32) - function table index for call_indirect
 --   bytes 36-39: resume_label (i32) - yield point ID for br_table
---   bytes 40-43: status (i32) - 0=pending, 1=resumed, 2=freed
---   bytes 44-47: reserved (i32) - for alignment
+--   bytes 40-43: status (i32) - 0=pending, 1=resumed, 2=freed, 3=error
+--   bytes 44-47: arity (i32) - function parameter count for call_indirect dispatch
+--   bytes 48-55: reserved (i64) - for future use/alignment
 
 -- | Size of an async continuation object
 asyncContSize :: Word32
-asyncContSize = 48
+asyncContSize = 56
 
 -- | Offset of continuation ID
 asyncContIdOffset :: Word32
@@ -819,6 +821,10 @@ asyncContResumeLabelOffset = 36
 -- | Offset of status field
 asyncContStatusOffset :: Word32
 asyncContStatusOffset = 40
+
+-- | Offset of function arity (for call_indirect type dispatch)
+asyncContArityOffset :: Word32
+asyncContArityOffset = 44
 
 -- | Status: pending (not yet resumed)
 asyncStatusPending :: Word32

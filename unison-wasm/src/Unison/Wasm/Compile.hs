@@ -43,6 +43,7 @@ module Unison.Wasm.Compile
   )
 where
 
+import Control.Monad (zipWithM)
 import Data.ByteString qualified as BS
 import Data.List (groupBy, sort)
 import Data.Map.Strict (Map)
@@ -182,6 +183,7 @@ compileGroupWithLifted (Rec localDefs entry) liftedGroups exportName = do
   -- Table order: liftedFuncs, then localFuncs, then entryFunc
   -- Each lifted group may produce multiple functions, but we only index the entry
   let refTableIndices = Map.fromList $ zip (map fst liftedGroups) [0..]
+      numLifted = length liftedGroups
 
   -- Compile lifted combinators first
   liftedFuncs <- concat <$> mapM (compileLiftedGroup refNames refArities refTableIndices) liftedGroups
@@ -192,11 +194,16 @@ compileGroupWithLifted (Rec localDefs entry) liftedGroups exportName = do
   -- Build arity map for local definitions
   let funcArities = Map.fromList [(v, superNormalArity sn) | (v, sn) <- localDefs]
 
+  -- Build table indices for local functions and entry
+  -- Order: lifted funcs (0..numLifted-1), local funcs (numLifted..), entry (at the end)
+  let localFuncTableIndices = Map.fromList [(v, numLifted + i) | ((v, _), i) <- zip localDefs [0..]]
+      entryTableIdx = numLifted + length localDefs
+
   -- Compile local definitions from the main group (if any)
-  localFuncs <- mapM (compileLocalDefWithRefCtx funcNames funcArities refNames refArities refTableIndices exportName) localDefs
+  localFuncs <- mapM (compileLocalDefWithTableIdx funcNames funcArities refNames refArities refTableIndices localFuncTableIndices exportName) localDefs
 
   -- Compile the entry function with reference context (so it can call lifted combinators)
-  entryFunc <- compileSuperNormalWithRefCtx funcNames funcArities refNames refArities refTableIndices exportName entry exportName
+  entryFunc <- compileSuperNormalWithTableIdx funcNames funcArities refNames refArities refTableIndices entryTableIdx exportName entry exportName
 
   -- Merge: runtime + lifted functions + local functions + entry
   let allFuncs = Runtime.runtimeFunctions ++ liftedFuncs ++ localFuncs ++ [entryFunc]
@@ -244,26 +251,42 @@ compileMultipleWithLifted entries liftedGroups = do
       refArities = Map.fromList (liftedArities ++ entryArities)
 
   -- Build a map from Reference to table index
-  let liftedIndices = zip (map fst liftedGroups) [0..]
-      entryIndices = zip [ref | (ref, _, _) <- entries] [length liftedGroups..]
-      refTableIndices = Map.fromList (liftedIndices ++ entryIndices)
+  -- Table order: liftedFuncs, then allLocalFuncs (across all entries), then allEntryFuncs
+  let numLifted = length liftedGroups
+      liftedIndices = zip (map fst liftedGroups) [0..]
+      refTableIndices = Map.fromList liftedIndices
+
+  -- Count total local funcs across all entries to compute entry func indices
+  let allLocalDefs = [localDefs | (_, Rec localDefs _, _) <- entries]
+      numLocalFuncs = sum (map length allLocalDefs)
 
   -- Compile lifted combinators first
   liftedFuncs <- concat <$> mapM (compileLiftedGroup refNames refArities refTableIndices) liftedGroups
 
-  -- Compile each entry point
-  entryFuncsWithLocals <- mapM (\(_ref, Rec localDefs entry, exportName) -> do
-    -- Build function name map for local definitions in this entry's group
-    let funcNames = Map.fromList [(v, Text.unpack (Var.name v)) | (v, _) <- localDefs]
-    let funcArities = Map.fromList [(v, superNormalArity sn) | (v, sn) <- localDefs]
+  -- Compile each entry point with correct table indices
+  -- We need to track the running offset for local function indices
+  let compileEntry baseLocalIdx (entryIdx, (_ref, Rec localDefs entry, exportName)) = do
+        -- Build function name map for local definitions in this entry's group
+        let funcNames = Map.fromList [(v, Text.unpack (Var.name v)) | (v, _) <- localDefs]
+            funcArities = Map.fromList [(v, superNormalArity sn) | (v, sn) <- localDefs]
+            -- Table indices for this entry's local functions
+            localTableIndices = Map.fromList [(v, baseLocalIdx + i) | ((v, _), i) <- zip localDefs [0..]]
+            -- Table index for entry function: after all lifted and all local funcs
+            entryTableIdx = numLifted + numLocalFuncs + entryIdx
 
-    -- Compile local definitions
-    localFuncs <- mapM (compileLocalDefWithRefCtx funcNames funcArities refNames refArities refTableIndices exportName) localDefs
+        -- Compile local definitions with correct table indices
+        localFuncs <- mapM (compileLocalDefWithTableIdx funcNames funcArities refNames refArities refTableIndices localTableIndices exportName) localDefs
 
-    -- Compile entry function
-    entryFunc <- compileSuperNormalWithRefCtx funcNames funcArities refNames refArities refTableIndices exportName entry exportName
+        -- Compile entry function with correct table index
+        entryFunc <- compileSuperNormalWithTableIdx funcNames funcArities refNames refArities refTableIndices entryTableIdx exportName entry exportName
 
-    pure (localFuncs, entryFunc)) entries
+        pure (localFuncs, entryFunc)
+
+  -- Process entries, tracking running offset for local functions
+  entryFuncsWithLocals <- zipWithM (\idx entry@(_, Rec _localDefs _, _) -> do
+    let baseLocalIdx = numLifted + sum (map length (take idx allLocalDefs))
+    compileEntry baseLocalIdx (idx, entry)
+    ) [0..] entries
 
   let allLocalFuncs = concatMap fst entryFuncsWithLocals
       allEntryFuncs = map snd entryFuncsWithLocals
@@ -343,28 +366,49 @@ compileLocalDefWithRefCtx funcNames funcArities refNames refArities refTableIndi
   let name = Text.unpack (Var.name v)
   compileSuperNormalWithRefCtx funcNames funcArities refNames refArities refTableIndices currentFunc sn name
 
--- | Compile a SuperNormal with reference context (for lifted combinators)
-compileSuperNormalWithRefCtx ::
+-- | Compile a local definition with an explicit table index
+compileLocalDefWithTableIdx ::
+  (Var v) =>
+  Map v String ->
+  Map v Int ->
+  Map Reference String ->
+  Map Reference Int ->
+  Map Reference Int ->  -- ref table indices
+  Map v Int ->          -- local var table indices
+  String ->
+  (v, SuperNormal Reference v) ->
+  CompileResult WatFunction
+compileLocalDefWithTableIdx funcNames funcArities refNames refArities refTableIndices localTableIndices currentFunc (v, sn) = do
+  let name = Text.unpack (Var.name v)
+      tableIdx = Map.findWithDefault 0 v localTableIndices
+  compileSuperNormalWithTableIdx funcNames funcArities refNames refArities refTableIndices tableIdx currentFunc sn name
+
+-- | Compile a SuperNormal with an explicit table index (for correct async resume)
+compileSuperNormalWithTableIdx ::
   (Var v) =>
   Map v String ->
   Map v Int ->
   Map Reference String ->
   Map Reference Int ->
   Map Reference Int ->  -- table indices
+  Int ->                -- explicit function table index
   String ->
   SuperNormal Reference v ->
   String ->
   CompileResult WatFunction
-compileSuperNormalWithRefCtx funcNames funcArities refNames refArities refTableIndices currentFunc (Lambda mems body) name = do
+compileSuperNormalWithTableIdx funcNames funcArities refNames refArities refTableIndices funcTableIdx currentFunc (Lambda mems body) name = do
   -- Extract parameter variables and get the inner body
   let (paramVars, innerBody) = unabss body
+      funcArity = length mems  -- Number of function parameters
       baseCtx = emptyCtx
         { ctxCurrentFunc = currentFunc,
           ctxFuncNames = funcNames,
           ctxRefNames = refNames,
           ctxFuncArities = funcArities,
           ctxRefArities = refArities,
-          ctxRefTableIndices = refTableIndices
+          ctxRefTableIndices = refTableIndices,
+          ctxFuncTableIdx = funcTableIdx,
+          ctxFuncArity = funcArity
         }
       -- Only bind as many parameters as we have conventions for
       ctx = bindVars (zip (take (length mems) paramVars) mems) baseCtx
@@ -391,8 +435,26 @@ compileSuperNormalWithRefCtx funcNames funcArities refNames refArities refTableI
         , ("__ffi_result", I64)     -- TFOp: FFI result for yield check
         , ("__async_locals_ptr", I32) -- TFOp: Pointer to saved locals array
         ]
-      funcLocals' = drop (length mems) (ctxLocals finalCtx) ++ helperLocals
+
+      -- Check if this function has yield points and needs state machine transformation
+      hasAsync = Async.hasYieldPoints bodyInstrs
+
+      -- Add state machine locals if needed
+      asyncLocals = if hasAsync
+        then [("__state", I32)]  -- State variable for state machine
+        else []
+
+      funcLocals' = drop (length mems) (ctxLocals finalCtx) ++ helperLocals ++ asyncLocals
       funcResults = [I64]
+
+      -- For state machine transformation, we need ALL locals including parameters
+      -- because we need to save and restore parameters across async yields
+      allLocalsForAsync = funcParams ++ funcLocals'
+
+      -- Apply state machine transformation if function has yield points
+      transformedBody = if hasAsync
+        then Async.transformToStateMachine allLocalsForAsync bodyInstrs
+        else bodyInstrs
 
   pure
     WatFunction
@@ -400,7 +462,94 @@ compileSuperNormalWithRefCtx funcNames funcArities refNames refArities refTableI
         funcParams = funcParams,
         funcLocals = funcLocals',
         funcResults = funcResults,
-        funcBody = bodyInstrs
+        funcBody = transformedBody
+      }
+
+-- | Compile a SuperNormal with reference context (for lifted combinators)
+-- This version computes the table index from refNames (for lifted combinators)
+compileSuperNormalWithRefCtx ::
+  (Var v) =>
+  Map v String ->
+  Map v Int ->
+  Map Reference String ->
+  Map Reference Int ->
+  Map Reference Int ->  -- table indices
+  String ->
+  SuperNormal Reference v ->
+  String ->
+  CompileResult WatFunction
+compileSuperNormalWithRefCtx funcNames funcArities refNames refArities refTableIndices currentFunc (Lambda mems body) name = do
+  -- Extract parameter variables and get the inner body
+  let (paramVars, innerBody) = unabss body
+      -- Compute function table index for this function (for async resume)
+      -- The index is based on the function name in the table
+      funcTableIdx = case Map.lookup name (Map.fromList [(n, i) | (n, i) <- zip (Map.elems refNames) [0..]]) of
+        Just idx -> idx
+        Nothing -> length (Map.elems refNames)  -- Entry func is at the end
+      funcArity = length mems  -- Number of function parameters
+      baseCtx = emptyCtx
+        { ctxCurrentFunc = currentFunc,
+          ctxFuncNames = funcNames,
+          ctxRefNames = refNames,
+          ctxFuncArities = funcArities,
+          ctxRefArities = refArities,
+          ctxRefTableIndices = refTableIndices,
+          ctxFuncTableIdx = funcTableIdx,
+          ctxFuncArity = funcArity
+        }
+      -- Only bind as many parameters as we have conventions for
+      ctx = bindVars (zip (take (length mems) paramVars) mems) baseCtx
+
+  -- Compile the inner body
+  (bodyInstrs, finalCtx) <- compileANormalWithCtx ctx innerBody
+
+  let funcParams = [("p" ++ show i, I64) | i <- [0 .. length mems - 1]]
+      -- Add runtime helper locals used by various constructs
+      helperLocals =
+        [ ("__pap_temp", I32)       -- PAp allocation
+        , ("__datag_temp", I32)     -- DataG allocation
+        , ("__text_temp", I32)      -- Text literal allocation
+        , ("__cont_ptr", I32)       -- Continuation pointer (TKon)
+        , ("__k_start", I32)        -- TShift: K chain start
+        , ("__k_walk", I32)         -- TShift: K walk pointer
+        , ("__mark_ptr", I32)       -- TShift: Found Mark frame
+        , ("__float_temp", I64)     -- Float operations temp
+        , ("__frame_tag", I32)      -- TShift: Frame tag
+        , ("__captured_ptr", I32)   -- TShift: Captured object
+        , ("__req_ptr", I32)        -- TReq: Request object pointer
+        , ("__req_arg0", I64)       -- TReq: First arg temp
+        , ("__handler_ptr", I32)    -- TReq: Handler pointer from denv
+        , ("__ffi_result", I64)     -- TFOp: FFI result for yield check
+        , ("__async_locals_ptr", I32) -- TFOp: Pointer to saved locals array
+        ]
+
+      -- Check if this function has yield points and needs state machine transformation
+      hasAsync = Async.hasYieldPoints bodyInstrs
+
+      -- Add state machine locals if needed
+      asyncLocals = if hasAsync
+        then [("__state", I32)]  -- State variable for state machine
+        else []
+
+      funcLocals' = drop (length mems) (ctxLocals finalCtx) ++ helperLocals ++ asyncLocals
+      funcResults = [I64]
+
+      -- For state machine transformation, we need ALL locals including parameters
+      -- because we need to save and restore parameters across async yields
+      allLocalsForAsync = funcParams ++ funcLocals'
+
+      -- Apply state machine transformation if function has yield points
+      transformedBody = if hasAsync
+        then Async.transformToStateMachine allLocalsForAsync bodyInstrs
+        else bodyInstrs
+
+  pure
+    WatFunction
+      { funcName = name,
+        funcParams = funcParams,
+        funcLocals = funcLocals',
+        funcResults = funcResults,
+        funcBody = transformedBody
       }
 
 -- | Compile a local definition from the group
@@ -425,7 +574,8 @@ compileSuperNormalWithCtx ::
 compileSuperNormalWithCtx funcNames _currentFunc (Lambda mems body) name = do
   -- Extract parameter variables from the body and get the inner body
   let (paramVars, innerBody) = unabss body
-      baseCtx = emptyCtx { ctxCurrentFunc = name, ctxFuncNames = funcNames }
+      funcArity = length mems  -- Number of function parameters
+      baseCtx = emptyCtx { ctxCurrentFunc = name, ctxFuncNames = funcNames, ctxFuncArity = funcArity }
       -- Only bind as many parameters as we have conventions for
       ctx = bindVars (zip (take (length mems) paramVars) mems) baseCtx
 
@@ -464,9 +614,13 @@ compileSuperNormalWithCtx funcNames _currentFunc (Lambda mems body) name = do
       funcLocals' = drop (length mems) (ctxLocals finalCtx) ++ helperLocals ++ asyncLocals
       funcResults = [I64] -- All functions return i64 (boxed values or unboxed integers)
 
+      -- For state machine transformation, we need ALL locals including parameters
+      -- because we need to save and restore parameters across async yields
+      allLocalsForAsync = funcParams ++ funcLocals'
+
       -- Apply state machine transformation if function has yield points
       transformedBody = if hasAsync
-        then Async.transformToStateMachine funcLocals' bodyInstrs
+        then Async.transformToStateMachine allLocalsForAsync bodyInstrs
         else bodyInstrs
 
   pure
@@ -598,11 +752,11 @@ compileANormal ctx (TPrm op args) = do
     TRCE -> do
       let (yieldId, ctx2) = allocYieldPoint ctx1
           allLocals = ctxLocals ctx2
-      pure (argInstrs ++ ffiCallWithYieldCheckFull "Debug_trace" (ctxFuncTableIdx ctx2) yieldId allLocals, ctx2)
+      pure (argInstrs ++ ffiCallWithYieldCheckFull "Debug_trace" (ctxFuncTableIdx ctx2) yieldId allLocals (ctxFuncArity ctx2), ctx2)
     PRNT -> do
       let (yieldId, ctx2) = allocYieldPoint ctx1
           allLocals = ctxLocals ctx2
-      pure (argInstrs ++ ffiCallWithYieldCheckFull "Debug_watch" (ctxFuncTableIdx ctx2) yieldId allLocals, ctx2)
+      pure (argInstrs ++ ffiCallWithYieldCheckFull "Debug_watch" (ctxFuncTableIdx ctx2) yieldId allLocals (ctxFuncArity ctx2), ctx2)
     _ -> do
       -- Regular primitive - emit single instruction
       opInstr <- compilePrimOp op (length args)
@@ -622,11 +776,11 @@ compileANormal ctx (TApp (FComb ref) args) = do
         "Debug.trace" -> do
           let (yieldId, ctx2) = allocYieldPoint ctx1
               allLocals = ctxLocals ctx2
-          pure (argInstrs ++ ffiCallWithYieldCheckFull "Debug_trace" (ctxFuncTableIdx ctx2) yieldId allLocals, ctx2)
+          pure (argInstrs ++ ffiCallWithYieldCheckFull "Debug_trace" (ctxFuncTableIdx ctx2) yieldId allLocals (ctxFuncArity ctx2), ctx2)
         "Debug.watch" -> do
           let (yieldId, ctx2) = allocYieldPoint ctx1
               allLocals = ctxLocals ctx2
-          pure (argInstrs ++ ffiCallWithYieldCheckFull "Debug_watch" (ctxFuncTableIdx ctx2) yieldId allLocals, ctx2)
+          pure (argInstrs ++ ffiCallWithYieldCheckFull "Debug_watch" (ctxFuncTableIdx ctx2) yieldId allLocals (ctxFuncArity ctx2), ctx2)
         _ ->
           -- Try to map builtin to primitive op
           case builtinToPrimOp name numArgs of
@@ -639,7 +793,7 @@ compileANormal ctx (TApp (FComb ref) args) = do
                   let funcName = foreignFuncToImportName ff
                       (yieldId, ctx2) = allocYieldPoint ctx1
                       allLocals = ctxLocals ctx2
-                  pure (argInstrs ++ ffiCallWithYieldCheckFull funcName (ctxFuncTableIdx ctx2) yieldId allLocals, ctx2)
+                  pure (argInstrs ++ ffiCallWithYieldCheckFull funcName (ctxFuncTableIdx ctx2) yieldId allLocals (ctxFuncArity ctx2), ctx2)
                 Nothing ->
                   -- Unknown builtin
                   Left $ UnsupportedConstruct $ "Unknown builtin: " <> name
@@ -1388,7 +1542,7 @@ compileANormal ctx (TFOp foreignFunc args) = do
   let funcName = foreignFuncToImportName foreignFunc
       (yieldId, ctx2) = allocYieldPoint ctx1
       allLocals = ctxLocals ctx2
-  pure (argInstrs ++ ffiCallWithYieldCheckFull funcName (ctxFuncTableIdx ctx2) yieldId allLocals, ctx2)
+  pure (argInstrs ++ ffiCallWithYieldCheckFull funcName (ctxFuncTableIdx ctx2) yieldId allLocals (ctxFuncArity ctx2), ctx2)
 
 -- Fallback for unsupported constructs
 compileANormal ctx _term = do
@@ -1414,6 +1568,7 @@ compileArgs ctx (v:vs) = do
 -- * funcTableIdx - this function's index in the function table
 -- * yieldPointId - unique ID for this yield point (for br_table resume)
 -- * localNames - list of (name, type) for all locals to save
+-- * funcArity - the function's parameter count for call_indirect dispatch
 --
 -- The generated code includes YieldPointStart/YieldPointEnd markers that are
 -- processed by the state machine transformation in compileSuperNormal.
@@ -1422,8 +1577,9 @@ ffiCallWithYieldCheckFull ::
   Int ->             -- Function table index
   Int ->             -- Yield point ID
   [(String, WatValType)] -> -- All locals to save
+  Int ->             -- Function arity (number of parameters)
   [WatInstr]
-ffiCallWithYieldCheckFull funcName funcTableIdx yieldPointId locals =
+ffiCallWithYieldCheckFull funcName funcTableIdx yieldPointId locals funcArity =
   let localsCount = length locals
       -- Generate instructions to save each local to the locals array
       -- Array layout: locals[i] at offset i*8
@@ -1463,7 +1619,11 @@ ffiCallWithYieldCheckFull funcName funcTableIdx yieldPointId locals =
              LocalGet "__async_locals_ptr",  -- locals_ptr
              I32Const (fromIntegral localsCount),  -- locals_count
              I32Const (fromIntegral funcTableIdx), -- func_idx
-             I32Const (fromIntegral yieldPointId), -- resume_label
+             -- resume_label is yieldPointId + 1 because:
+             -- State N contains the yield point with id=N
+             -- On resume, we want to jump to state N+1 (after the yield)
+             I32Const (fromIntegral (yieldPointId + 1)), -- resume_label
+             I32Const (fromIntegral funcArity),    -- arity
              Call "__alloc_async_cont",
              GlobalSet "async_cont_ptr",
              -- Return YIELD_SENTINEL

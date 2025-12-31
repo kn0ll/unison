@@ -139,12 +139,23 @@ resumeDispatcher locals =
       ]
   ]
 
--- | Generate instructions to restore all locals from the saved array
+-- | Generate instructions to restore all locals from the saved array.
+-- Only restores i64 locals (user values). Helper locals (i32) are runtime state.
 restoreLocals :: [(String, WatValType)] -> [WatInstr]
 restoreLocals locals =
-  concatMap restoreLocal (zip [0..] locals)
+  -- Filter to only i64 locals (user data), skip i32 helpers and __state
+  let i64Locals = [(idx, name) | (idx, (name, ty)) <- zip [0..] locals,
+                   ty == I64,
+                   not (isHelperLocal name)]
+  in concatMap restoreLocal i64Locals
   where
-    restoreLocal (idx, (name, _)) =
+    -- Helper locals that shouldn't be saved/restored
+    isHelperLocal name = "__" `isPrefixOf` name
+
+    isPrefixOf :: String -> String -> Bool
+    isPrefixOf prefix str = take (length prefix) str == prefix
+
+    restoreLocal (idx, name) =
       [ LocalGet "__async_locals_ptr",
         I64Load (fromIntegral (idx * 8 :: Int)),
         LocalSet name
@@ -218,71 +229,90 @@ removeYieldMarkers = concatMap process
     process other = [other]
 
 -- | Generate the state machine body with proper br_table dispatch.
+--
+-- The structure is:
+-- @
+-- (block $exit
+--   (loop $loop
+--     (block $state_N
+--       (block $state_N-1
+--         ...
+--         (block $state_0
+--           (local.get $state)
+--           (br_table $state_0 $state_1 ... $state_N $exit)
+--         )
+--         ;; STATE 0 code
+--         (br $loop)
+--       )
+--       ;; STATE 1 code
+--       (br $loop)
+--     )
+--     ;; STATE N code
+--     (br $exit)
+--   )
+-- )
+-- @
 stateMachineBody :: [Segment] -> [String] -> [WatInstr]
 stateMachineBody segments stateLabels =
   let exitLabel = "__exit"
       loopLabel = "__state_loop"
+      numStates = length segments
+      -- The nested blocks handle states 0 to N-2
+      -- The LAST segment's code goes AFTER the loop/block structure
+      (nestedBlockInstrs, lastStateCode) = buildNestedBlocks segments stateLabels loopLabel
   in
   [ Comment "=== State Machine Body ===",
     Block exitLabel
       [ Loop loopLabel
-          ( nestedBlocks stateLabels
-              ++ [ -- br_table dispatch
-                   LocalGet "__state",
-                   BrTable stateLabels exitLabel
-                 ]
-              ++ stateCode segments loopLabel exitLabel
-          )
+          nestedBlockInstrs
       ]
   ]
+  -- Last state's code goes after the block/loop, so its value is returned
+  ++ [Comment $ "=== STATE " ++ show (numStates - 1) ++ " (final) ==="]
+  ++ lastStateCode
 
--- | Generate nested block structure for br_table targets.
--- br_table jumps to the END of a block, so we need nested blocks
--- where the innermost is state_0.
-nestedBlocks :: [String] -> [WatInstr]
-nestedBlocks [] = []
-nestedBlocks labels =
-  -- Create nested blocks: innermost = first label
-  foldr wrapBlock [] labels
-  where
-    wrapBlock lbl inner = [Block lbl inner]
+-- | Build the nested block structure with br_table at the center.
+-- Returns: (list of block instructions for the loop, last segment's code for after the loop)
+buildNestedBlocks :: [Segment] -> [String] -> String -> ([WatInstr], [WatInstr])
+buildNestedBlocks segments stateLabels loopLabel =
+  let numStates = length segments
+      -- Build the innermost block (state_0) with br_table
+      -- br_table: 0->state_0, 1->state_1, ..., default->exit via last state
+      innermost = Block (head stateLabels)
+        [ Comment "br_table dispatch",
+          LocalGet "__state",
+          -- For the last state, we break to __exit which exits the loop
+          -- and then falls through to the last state code
+          BrTable (take (numStates - 1) stateLabels) "__exit"
+        ]
+      -- Build nested blocks for states 0 to N-2
+      nestedBlocks = if numStates <= 1
+        then innermost
+        else foldl' (\inner idx -> wrapWithState segments stateLabels loopLabel idx inner)
+               innermost
+               [1 .. numStates - 1]
+      -- Last segment's code
+      lastSegCode = segmentCode (last segments)
+  in ([nestedBlocks], lastSegCode)
 
--- | Generate the code for each state.
--- States are arranged after their corresponding blocks.
-stateCode :: [Segment] -> String -> String -> [WatInstr]
-stateCode [] _ _ = []
-stateCode segments loopLabel exitLabel =
-  -- Generate code for each segment in order
-  -- The br_table + nested blocks structure means:
-  -- - br to $state_0 exits innermost block (lands at state 0 code)
-  -- - br to $state_1 exits next block (lands at state 1 code)
-  -- etc.
-  concatMap (genStateCode (length segments)) (zip [0..] segments)
-  where
-    genStateCode :: Int -> (Int, Segment) -> [WatInstr]
-    genStateCode numStates (idx, seg) =
-      [ Comment $ "=== STATE " ++ show idx ++ " ===" ]
-      ++ segmentCode seg
-      ++ transitionCode idx numStates (segmentYieldId seg)
-
-    -- Generate transition to next state or exit
-    transitionCode :: Int -> Int -> Maybe Int -> [WatInstr]
-    transitionCode idx numStates maybeYield =
-      if idx >= numStates - 1
-        then
-          -- Final state: exit the loop
-          [ Br exitLabel ]
-        else case maybeYield of
-          Just _ ->
-            -- This state ends with a yield point
-            -- If we get here (didn't yield), continue to next state
-            [ I32Const (fromIntegral (idx + 1)),
+-- | Wrap an inner block with the next state's block structure
+wrapWithState :: [Segment] -> [String] -> String -> Int -> WatInstr -> WatInstr
+wrapWithState segments stateLabels loopLabel stateIdx inner =
+  let numStates = length segments
+      prevStateIdx = stateIdx - 1
+      prevSeg = segments !! prevStateIdx
+      prevLabel = stateLabels !! stateIdx  -- Block label is state_N
+      isBeforeLast = stateIdx == numStates - 1
+      -- For the state before last: break to exit (last state code is after loop)
+      -- For other states: update state and branch back to loop
+      transition = if isBeforeLast
+        then [Br "__exit"]  -- Exit loop to run last state code
+        else [I32Const (fromIntegral stateIdx),
               LocalSet "__state",
-              Br loopLabel
-            ]
-          Nothing ->
-            -- No yield in this state, just continue
-            [ I32Const (fromIntegral (idx + 1)),
-              LocalSet "__state",
-              Br loopLabel
-            ]
+              Br loopLabel]
+  in Block prevLabel
+       ( [inner]
+         ++ [Comment $ "=== STATE " ++ show prevStateIdx ++ " ==="]
+         ++ segmentCode prevSeg
+         ++ transition
+       )

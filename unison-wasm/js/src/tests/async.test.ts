@@ -186,7 +186,8 @@ describe('ForeignHandleTable (async context)', () => {
 describe('Async ABI Constants', () => {
   it('YIELD_SENTINEL is defined', () => {
     assert.strictEqual(typeof YIELD_SENTINEL, 'bigint');
-    assert.strictEqual(YIELD_SENTINEL, 0xffff_ffff_ffff_fffen);
+    // YIELD_SENTINEL is -2n (signed) which equals 0xffff_ffff_ffff_fffe (unsigned)
+    assert.strictEqual(YIELD_SENTINEL, -2n);
   });
 
   it('OBJ_ASYNC_CONT is defined', () => {
@@ -277,11 +278,6 @@ async function instantiateWatWithImports(
   return await WebAssembly.instantiate(module, imports);
 }
 
-// Helper to compare bigints as unsigned 64-bit values
-function asU64(n: bigint): bigint {
-  return BigInt.asUintN(64, n);
-}
-
 describe('WASM Yield Check (Phase 1)', () => {
   before(async () => {
     const wabt = await import('wabt');
@@ -327,8 +323,8 @@ describe('WASM Yield Check (Phase 1)', () => {
     const main = instance.exports['main'] as () => bigint;
     const result = main();
 
-    // Compare as unsigned to handle signed/unsigned mismatch
-    assert.strictEqual(asU64(result), YIELD_SENTINEL);
+    // WASM returns -2n (signed), which equals YIELD_SENTINEL
+    assert.strictEqual(result, YIELD_SENTINEL);
   });
 
   it('returns normal value when FFI does not yield', async () => {
@@ -413,8 +409,8 @@ describe('WASM Yield Check (Phase 1)', () => {
     const main = instance.exports['main'] as () => bigint;
     const result = main();
 
-    // Yield should propagate through wrapper to main (compare as unsigned)
-    assert.strictEqual(asU64(result), YIELD_SENTINEL);
+    // Yield should propagate through wrapper to main
+    assert.strictEqual(result, YIELD_SENTINEL);
   });
 
   it('sync FFI (Debug.trace style) works correctly', async () => {
@@ -510,19 +506,19 @@ describe('Phase 2: Local State Saving', () => {
       )
 
       ;; Allocate async cont object
-      ;; Args: cont_id (i64), k_ptr (i32), denv_ptr (i32), locals_ptr (i32), locals_count (i32), func_idx (i32), resume_label (i32)
+      ;; Args: cont_id (i64), k_ptr (i32), denv_ptr (i32), locals_ptr (i32), locals_count (i32), func_idx (i32), resume_label (i32), arity (i32)
       (func $__alloc_async_cont (export "__alloc_async_cont")
             (param $cont_id i64) (param $k_ptr i32) (param $denv_ptr i32) (param $locals_ptr i32)
-            (param $locals_count i32) (param $func_idx i32) (param $resume_label i32) (result i32)
+            (param $locals_count i32) (param $func_idx i32) (param $resume_label i32) (param $arity i32) (result i32)
         (local $ptr i32)
-        ;; Allocate 48 bytes for AsyncCont
-        i32.const 48
+        ;; Allocate 56 bytes for AsyncCont
+        i32.const 56
         call $__alloc
         local.set $ptr
 
-        ;; Store header (8 bytes: version=0, obj_tag=0x00b, size=48)
+        ;; Store header (8 bytes: version=0, obj_tag=0x00b, size=56)
         local.get $ptr
-        i64.const 0x0000003000B00000  ;; size=48, tag=0x00b, version=0
+        i64.const 0x0000003800B00000  ;; size=56, tag=0x00b, version=0
         i64.store
 
         ;; Store cont_id at offset 8
@@ -564,6 +560,11 @@ describe('Phase 2: Local State Saving', () => {
         local.get $ptr
         i32.const 0
         i32.store offset=40
+
+        ;; Store arity at offset 44
+        local.get $ptr
+        local.get $arity
+        i32.store offset=44
 
         local.get $ptr
       )
@@ -618,7 +619,7 @@ describe('Phase 2: Local State Saving', () => {
           i64.add
           global.set $async_cont_id
 
-          ;; Create AsyncCont: cont_id, k_ptr, denv_ptr, locals_ptr, locals_count, func_idx, resume_label
+          ;; Create AsyncCont: cont_id, k_ptr, denv_ptr, locals_ptr, locals_count, func_idx, resume_label, arity
           global.get $async_cont_id  ;; cont_id
           global.get $k_ptr          ;; k_ptr
           global.get $denv_ptr       ;; denv_ptr
@@ -626,6 +627,7 @@ describe('Phase 2: Local State Saving', () => {
           i32.const 3                ;; locals_count
           i32.const 42               ;; func_idx (example: function table index 42)
           i32.const 0                ;; resume_label (yield point 0)
+          i32.const 0                ;; arity (0 for this test function)
           call $__alloc_async_cont
           global.set $async_cont_ptr
 
@@ -660,7 +662,7 @@ describe('Phase 2: Local State Saving', () => {
 
     // Verify yield happened
     assert.strictEqual(yieldCalled, true, 'FFI should be called');
-    assert.strictEqual(asU64(result), YIELD_SENTINEL, 'Should return YIELD_SENTINEL');
+    assert.strictEqual(result, YIELD_SENTINEL, 'Should return YIELD_SENTINEL');
 
     // Verify AsyncCont was created
     const contPtr = asyncContPtr.value as number;
