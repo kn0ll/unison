@@ -140,6 +140,18 @@ unison-wasm/
 
 ---
 
+## Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [ABI.md](./ABI.md) | Memory layout, TypedSlot, heap objects |
+| [FFI.md](./FFI.md) | Foreign function interface specification |
+| [ASYNC.md](./ASYNC.md) | Async yield/resume implementation strategy |
+| [PRIMITIVES.md](./PRIMITIVES.md) | Unison primitives for WASM |
+| [TODO.md](./TODO.md) | Known limitations, future work |
+
+---
+
 ## Memory Layout (ABI)
 
 See [`ABI.md`](./ABI.md) for full specification.

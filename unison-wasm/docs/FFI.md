@@ -24,7 +24,9 @@ This document defines the Foreign Function Interface for Unison WASM modules. It
 > **Note on Async FFI:** The JS runtime infrastructure is ready (yield sentinel,
 > `__resume`, continuation handles), but the **compiler doesn't yet generate
 > yield-checking code** after `TFOp` calls. WASM currently treats `YIELD_SENTINEL`
-> as a normal return value and continues executing. See `TODO.md` for details.
+> as a normal return value and continues executing.
+>
+> See **[ASYNC.md](./ASYNC.md)** for the full async implementation strategy.
 
 ### v0.2.0 (Planned)
 

@@ -167,6 +167,8 @@ end
 This is essentially implementing **delimited continuations** at the WASM level.
 See `compileANormal` case for `TFOp` in `Compile.hs` (currently just `Call funcName`).
 
+**📋 Full implementation plan:** See **[ASYNC.md](./ASYNC.md)** for phased strategy and exit criteria.
+
 ### Code Generation
 
 | MVP Choice | Cost | Future Optimization |
