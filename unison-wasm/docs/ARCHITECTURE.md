@@ -25,12 +25,14 @@ This document is the canonical reference for the Unison WASM compiler and runtim
 Unison WASM compiles Unison terms to WebAssembly, enabling the same code to run in browsers and Node.js. Foreign function calls bridge WASM to JavaScript, with full support for async operations.
 
 ```
-Unison Source → SuperGroup (ANF) → WAT → WASM Binary
-                                     ↓
-                              JavaScript Runtime
-                                     ↓
-                           FFI Handlers (sync/async)
+Unison Source → SuperGroup (ANF) → WAT Text → WASM Binary
+                                       ↓
+                                  JavaScript Runtime
+                                       ↓
+                             FFI Handlers (sync/async)
 ```
+
+**Why WAT text?** We emit human-readable WAT (WebAssembly Text Format) rather than binary WASM directly. This adds ~50ms compilation time but makes debugging dramatically easier — when something breaks, you can read the generated code. The `wat2wasm` tool converts to binary.
 
 ### Key Components
 
@@ -183,7 +185,7 @@ Functions with yield points are transformed into state machines:
     (else
       ;; Normal entry: state = 0
     ))
-  
+
   ;; State machine body
   (loop $state_loop
     (block $state_2
@@ -201,7 +203,7 @@ Functions with yield points are transformed into state machines:
 ### Async Handler Example
 
 ```typescript
-runtime.registerAsyncForeign('IO.delay.impl.v3', 
+runtime.registerAsyncForeign('IO.delay.impl.v3',
   async (rt, microseconds) => {
     const ms = Number(microseconds) / 1000;
     await new Promise(r => setTimeout(r, ms));
@@ -316,17 +318,17 @@ Resume with an error (creates `Left Failure`):
 class UnisonRuntime {
   // Load and instantiate WASM module
   async load(wasmBytes: BufferSource): Promise<void>;
-  
+
   // Run a function (handles async yield/resume)
   async run(funcName: string, ...args: bigint[]): Promise<bigint>;
-  
+
   // Apply a closure to arguments
   apply(closurePtr: bigint, ...args: bigint[]): bigint;
-  
+
   // Register FFI handlers
   registerForeign(name: string, handler: FFIHandler): void;
   registerAsyncForeign(name: string, handler: AsyncFFIHandler): void;
-  
+
   // Memory access
   allocText(text: string): number;
   readText(ptr: bigint): string;
@@ -341,10 +343,10 @@ Represents a suspended computation with exactly-once resumption:
 ```typescript
 class ContinuationHandle {
   readonly id: bigint;
-  
+
   // Resume with a value (can only call once)
   resume(value: unknown): void;
-  
+
   // Resume with an error (can only call once)
   resumeWithError(error: Error): void;
 }
