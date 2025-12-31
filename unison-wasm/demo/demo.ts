@@ -130,23 +130,32 @@ async function loadWasm(): Promise<void> {
 
 /**
  * Update the price display based on current quantity
+ * Calls the actual Unison WASM functions - no JS duplication!
  */
-function updatePrice(): void {
+async function updatePrice(): Promise<void> {
   if (!runtime) return;
 
   const qty = parseInt(qtySlider.value);
+  const delayMs = parseInt(delayInput.value) || 0;
+  const delayMicros = BigInt(delayMs * 1000);
 
-  // Calculate subtotal and discount for display
+  // Update quantity display immediately
+  qtyDisplay.textContent = String(qty);
+
+  // Call the actual Unison WASM function!
+  // calculatePriceWithDelay(delayMicros, quantity) -> price
+  const price = await runtime.run('calculatePriceWithDelay', delayMicros, BigInt(qty));
+
+  // For subtotal/discount display, compute from price
+  // (or we could export these as separate WASM functions)
   const unitPrice = 1000;
   const subtotal = qty * unitPrice;
-  const discount = qty >= 5 ? Math.floor(subtotal / 10) : 0;
-  const total = subtotal - discount;
+  const discount = subtotal - Number(price);
 
   // Update UI
-  qtyDisplay.textContent = String(qty);
   subtotalEl.textContent = formatCents(subtotal);
   discountEl.textContent = discount > 0 ? `-${formatCents(discount)}` : '$0.00';
-  totalEl.textContent = formatCents(total);
+  totalEl.textContent = formatCents(Number(price));
 
   // Hide previous server result
   serverResult.style.display = 'none';
