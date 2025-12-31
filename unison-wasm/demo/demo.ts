@@ -84,16 +84,7 @@ async function init(): Promise<void> {
  * Load the compiled WASM module using UnisonRuntime
  */
 async function loadWasm(): Promise<void> {
-  const response = await fetch('./dist/pricing.wasm');
-  if (!response.ok) {
-    throw new Error(
-      `Failed to load WASM module: ${response.status} ${response.statusText}\n\n` +
-      `Make sure to run 'npm run build:wasm' first to compile the Unison code.`
-    );
-  }
-  const bytes = await response.arrayBuffer();
-
-  // Create UnisonRuntime instance (same as server.ts)
+  // Create UnisonRuntime instance
   runtime = new UnisonRuntime();
 
   // Register sync FFI handlers for Debug.trace/watch
@@ -118,8 +109,8 @@ async function loadWasm(): Promise<void> {
     return 0n;
   });
 
-  // Load the WASM module
-  await runtime.loadWasm(bytes);
+  // Load the WASM module from URL (browser convenience method)
+  await runtime.loadWasmUrl('./dist/pricing.wasm');
 
   console.log('✅ WASM module loaded');
 }

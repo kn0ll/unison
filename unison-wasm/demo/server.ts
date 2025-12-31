@@ -12,7 +12,6 @@
 
 import express from 'express';
 import { existsSync } from 'fs';
-import { readFile } from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { UnisonRuntime } from '@unison/wasm-runtime';
@@ -36,8 +35,6 @@ async function loadWasm(): Promise<void> {
     console.error('   Run "npm run build:wasm" first to compile the Unison code.');
     process.exit(1);
   }
-
-  const wasmBytes = await readFile(wasmPath);
 
   runtime = new UnisonRuntime();
 
@@ -64,7 +61,8 @@ async function loadWasm(): Promise<void> {
     return 0n;
   });
 
-  await runtime.loadWasm(wasmBytes);
+  // Load from file path (Node.js convenience method)
+  await runtime.loadWasmFile(wasmPath);
   console.log('✅ WASM module loaded from', wasmPath);
 }
 

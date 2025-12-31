@@ -239,6 +239,18 @@ export class UnisonRuntime {
   }
 
   /**
+   * Load a WASM module from a URL (Browser).
+   */
+  async loadWasmUrl(url: string, customImports: UnisonImports = {}): Promise<void> {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch WASM: ${response.status} ${response.statusText}`);
+    }
+    const bytes = await response.arrayBuffer();
+    await this.loadWasm(bytes, customImports);
+  }
+
+  /**
    * Build the full imports object for WASM instantiation.
    */
   private buildImports(customImports: UnisonImports): WebAssembly.Imports {
