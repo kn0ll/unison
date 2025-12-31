@@ -1,31 +1,61 @@
--- server.u
--- HTTP server that runs the same pricing logic natively
---
--- This demonstrates that the SAME Unison code runs on:
--- - Browser (compiled to WASM)
--- - Server (native Unison runtime)
+use lib.unison_http_11_0_0
+use lib.unison_base_7_10_0
+use lib.unison_json_1_3_5
 
--- For now, this is a placeholder. In a full implementation,
--- this would use UCM's HTTP server abilities.
+type PriceResult = { subtotal: Nat, discount: Nat, total: Nat }
+
+calculatePrice : Nat -> Nat -> PriceResult
+calculatePrice delayMicros quantity =
+  _ = ##IO.delay.impl.v3 delayMicros
+  unitPrice = 1000
+  subtotal = quantity * unitPrice
+  discount = if quantity >= 5 then subtotal / 10 else 0
+  total = subtotal - discount
+  PriceResult subtotal discount total
+
+priceResultToJson : PriceResult -> Text
+priceResultToJson result =
+  Json.object.empty
+    |> Json.object.addNat "subtotal" (PriceResult.subtotal result)
+    |> Json.object.addNat "discount" (PriceResult.discount result)
+    |> Json.object.addNat "total" (PriceResult.total result)
+    |> Json.toText
+
+getQueryParamNat : Text -> Nat -> Query -> Nat
+getQueryParamNat key default query =
+  Query.getParam key query
+    |> List.head
+    |> Optional.flatMap Nat.fromText
+    |> Optional.getOrElse default
+
+priceHandler : Handler IO
+priceHandler = Handler cases
+  req | Routes.get (root Path./ "api" Path./ "price") req ->
+    rawQuery = URI.query (HttpRequest.uri req)
+    match Query.fromRawQuery rawQuery with
+      None -> ok (Body.fromText "{\"error\":\"invalid query\"}")
+      Some query ->
+        qty = getQueryParamNat "qty" 1 query
+        delayMs = getQueryParamNat "delay" 0 query
+        delayMicros = delayMs * 1000
+        result = calculatePrice delayMicros qty
+        jsonResponse = priceResultToJson result
+        HttpResponse.ok (Body.fromText jsonResponse)
+          |> HttpResponse.addHeader "Content-Type" "application/json"
+          |> HttpResponse.addHeader "Access-Control-Allow-Origin" "*"
+  _ -> abort
 
 server.main : '{IO, Exception} ()
 server.main = do
-  printLine "Starting Unison pricing server on http://localhost:8080"
-  printLine "Using the SAME calculatePrice function as the browser!"
+  printLine "🦄 Starting Unison pricing server on http://localhost:8080"
   printLine ""
   printLine "Endpoints:"
-  printLine "  GET /api/price?qty=5  → returns {quantity: 5, price: 4500}"
+  printLine "  GET /api/price?qty=5&delay=500"
   printLine ""
-
-  -- In a real implementation, this would be:
-  -- httpServer 8080 do request ->
-  --   match request.path with
-  --     "/api/price" ->
-  --       qty = parseNat (request.query "qty") |> getOrElse 1
-  --       price = calculatePrice qty
-  --       Response.ok (toJson {quantity = qty, price = price})
-  --     _ ->
-  --       Response.notFound "Not found"
-
-  printLine "Note: Full HTTP server requires UCM HTTP abilities."
-  printLine "For the demo, we use the Node.js server with the same WASM module."
+  printLine "This uses the SAME calculatePrice function as the browser WASM!"
+  printLine ""
+  config = server.Config.default |> server.Config.port.set (Port "8080")
+  routes = Routes.default <<< priceHandler
+  Random.run do
+    Threads.run do
+      server.runServer config (Routes.toFunction routes)
