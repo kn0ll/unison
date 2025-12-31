@@ -27,18 +27,14 @@ LANG=C.UTF-8 LC_ALL=C.UTF-8 stack build unison-wasm:exe:unison-wasm-poc --fast 2
   exit 1
 }
 
-# Check if codebase exists, if not create it
-if [ ! -d "$CODEBASE_DIR" ]; then
-  echo "  Creating demo codebase..."
-  cd "$SCRIPT_DIR"
-  rm -f setup-codebase.output.md
-  unison transcript --save-codebase-to "$CODEBASE_DIR" setup-codebase.md >/dev/null 2>&1 || {
-    echo "Error: Could not create codebase"
-    exit 1
-  }
-else
-  echo "  Using existing demo codebase at $CODEBASE_DIR"
-fi
+# Always recreate codebase to pick up pricing.u changes
+echo "  Creating demo codebase..."
+cd "$SCRIPT_DIR"
+rm -rf "$CODEBASE_DIR" setup-codebase.output.md
+unison transcript --save-codebase-to "$CODEBASE_DIR" setup-codebase.md >/dev/null 2>&1 || {
+  echo "Error: Could not create codebase"
+  exit 1
+}
 
 cd "$WASM_DIR"
 
@@ -49,7 +45,7 @@ LANG=C.UTF-8 LC_ALL=C.UTF-8 stack exec unison-wasm-poc -- \
     --codebase "$CODEBASE_DIR" \
     --project demo \
     --branch main \
-    calculatePrice calculateDiscount calculateSubtotal > "$DIST_DIR/pricing.wat" || {
+    calculatePrice calculateDiscount calculateSubtotal calculatePriceWithLog > "$DIST_DIR/pricing.wat" || {
   echo "Error: Compilation failed"
   exit 1
 }

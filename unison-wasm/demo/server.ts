@@ -24,6 +24,7 @@ interface WasmExports {
   calculatePrice: (qty: bigint) => bigint;
   calculateDiscount: (qty: bigint) => bigint;
   calculateSubtotal: (qty: bigint) => bigint;
+  calculatePriceWithLog: (qty: bigint) => bigint;
 }
 
 let wasmExports: WasmExports | null = null;
@@ -43,41 +44,40 @@ async function loadWasm(): Promise<void> {
 
   const wasmBytes = readFileSync(wasmPath);
 
-  // Foreign function imports - these implement IO abilities in JS
-  // Same functions work in browser (console.log) and server (Node.js console.log)
-  const imports = {
-    unison: {
-      // IO.printLine - prints a Text value (pointer to string in memory)
-      'IO.printLine': (ptr: bigint) => {
-        console.log('[Unison IO.printLine]', ptr);
-      },
-      // IO.printNat - prints a Nat value directly
-      'IO.printNat': (value: bigint) => {
-        const cents = Number(value);
-        const dollars = Math.floor(cents / 100);
-        const remainder = cents % 100;
-        const formatted = `$${dollars}.${remainder.toString().padStart(2, '0')}`;
-        console.log(`[Unison] Price calculated: ${formatted} (${cents} cents)`);
-      },
-      // IO.systemTime - returns current time in microseconds since epoch
-      'IO.systemTime': (): bigint => {
-        return BigInt(Date.now()) * 1000n; // milliseconds → microseconds
-      },
-      // IO.delay - delays for given microseconds (requires async yield/resume for full impl)
-      // For now, this is a sync stub; full async requires WAT to yield control
-      'IO.delay': (microseconds: bigint) => {
-        const ms = Number(microseconds) / 1000;
-        console.log(`[Unison IO.delay] ${ms}ms (sync stub - full async requires yield/resume)`);
-        // Note: Full implementation would yield to JS, setTimeout, then resume
-        // On server, we could use a blocking sleep, but that's not ideal
-      }
+  // FFI handlers for Debug.trace and Debug.watch
+  let memory: WebAssembly.Memory;
+
+  const readText = (ptr: bigint): string => {
+    try {
+      const view = new DataView(memory.buffer);
+      const ptrNum = Number(ptr);
+      const byteLen = view.getUint32(ptrNum + 8, true);  // TEXT_BYTELEN_OFFSET
+      const bytes = new Uint8Array(memory.buffer, ptrNum + 16, byteLen);  // TEXT_BYTES_OFFSET
+      return new TextDecoder().decode(bytes);
+    } catch {
+      return `<ptr:${ptr}>`;
     }
   };
 
+  const imports: WebAssembly.Imports = {
+    ffi: {
+      // Debug.trace : Text -> a -> ()
+      Debug_trace: (textPtr: bigint, _valPtr: bigint): bigint => {
+        console.log(`[trace] ${readText(textPtr)}`);
+        return 0n;
+      },
+      // Debug.watch : Text -> a -> a
+      Debug_watch: (textPtr: bigint): bigint => {
+        console.log(`[watch] ${readText(textPtr)}`);
+        return textPtr;
+      },
+    },
+  };
+
   const module = await WebAssembly.instantiate(wasmBytes, imports);
+  memory = module.instance.exports.memory as WebAssembly.Memory;
   wasmExports = module.instance.exports as unknown as WasmExports;
   console.log('✅ WASM module loaded from', wasmPath);
-  console.log('   Foreign functions (IO abilities) provided by Node.js');
 }
 
 /**
@@ -107,7 +107,8 @@ app.get('/api/price', (req, res) => {
   // Call all pricing functions from WASM - compiled from Unison
   const subtotal = Number(wasmExports.calculateSubtotal(BigInt(qty)));
   const discount = Number(wasmExports.calculateDiscount(BigInt(qty)));
-  const price = Number(wasmExports.calculatePrice(BigInt(qty)));
+  // Use calculatePriceWithLog to demonstrate FFI (Debug.trace)
+  const price = Number(wasmExports.calculatePriceWithLog(BigInt(qty)));
 
   res.json({
     quantity: qty,
@@ -120,7 +121,7 @@ app.get('/api/price', (req, res) => {
       price: formatCents(price),
     },
     source: 'unison-wasm',
-    note: 'Computed by the SAME Unison code as the browser! Check server logs for IO.printNat output.'
+    note: 'Computed by the SAME Unison code as the browser! Check server logs for Debug.trace output.'
   });
 });
 

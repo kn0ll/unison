@@ -35,3 +35,12 @@ calculateSubtotal quantity = quantity * 1000
 hasBulkDiscount : Nat -> Boolean
 hasBulkDiscount quantity = quantity >= 5
 
+-- Calculate price with logging (demonstrates FFI)
+-- Same logic as calculatePrice but with Debug.trace
+calculatePriceWithLog : Nat -> Nat
+calculatePriceWithLog quantity =
+  _ = Debug.trace "price calculated" ()
+  unitPrice = 1000
+  subtotal = quantity * unitPrice
+  discount = if quantity >= 5 then subtotal / 10 else 0
+  subtotal - discount

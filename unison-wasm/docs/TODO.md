@@ -22,23 +22,26 @@ The current implementation (v0.1.0) is a **proof of concept**. It demonstrates t
 
 | Item | Current State | Required |
 |------|---------------|----------|
-| **Browser foreign handlers** | Only `IO.printNat` | Handlers for `IO_delay`, stdout, + DOM/Events abilities |
+| **FFI (Foreign Function Interface)** | `Debug.trace` works | Full `IO.*` support, async yield/resume |
 
-### Browser Foreign Function Handlers
+### FFI Implementation Status
 
-The approach: Unison already has abilities and foreign functions. We provide **browser handlers** for them, just like we did with `IO.printNat` → `console.log`.
+See [FFI.md](./FFI.md) for the complete design.
 
-#### Existing Unison Foreign Functions → Browser Implementations
+#### Working Now
 
-| Unison Foreign Function | Native Implementation | Browser Handler | Status |
-|-------------------------|----------------------|-----------------|--------|
-| `IO.printNat` | Print to stdout | `console.log` | ✅ Done |
-| `IO.printLine` | Print to stdout | `console.log` | ✅ Done |
-| `IO.systemTime` | System clock | `Date.now() * 1000` | ✅ Done |
-| `IO.delay` | `threadDelay` | Stub (logs only) | ⏳ Needs yield/resume |
-| `IO_putBytes_impl_v3` (stdout) | Write to file handle | `console.log` | Not started |
-| `IO_getLine_impl_v1` (stdin) | Read from handle | `prompt()` or custom input | Not started |
-| `IO_getEnv_impl_v1` | Environment vars | Not available (or mock) | Not started |
+| Unison Builtin | ANF | WASM Import | Browser/Node Handler |
+|----------------|-----|-------------|---------------------|
+| `Debug.trace` | `TApp (FComb (Builtin "Debug.trace"))` | `call $Debug_trace` | `console.log("[trace]", text)` ✅ |
+| `Debug.watch` | `TApp (FComb (Builtin "Debug.watch"))` | `call $Debug_watch` | `console.log("[watch]", text)` ✅ |
+
+#### Next Phase
+
+| Unison Foreign Function | Implementation | Status |
+|-------------------------|----------------|--------|
+| `IO.delay.impl.v3` | Async yield/resume | ⏳ Phase 2 |
+| `IO.putBytes.impl.v3` | `console.log` / stdout | ⏳ Phase 3 |
+| HTTP via sockets | Complex - see FFI.md | ⏳ Phase 4 |
 
 #### Socket → Fetch Mapping (Significant Work)
 

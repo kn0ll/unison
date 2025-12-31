@@ -46,7 +46,9 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Word (Word32, Word64)
+import Data.Text.Encoding qualified as Text.Encoding
+import Unison.Util.Text qualified as UText
+import Data.Word (Word8, Word32, Word64)
 import Unison.ABT.Normalized qualified as ABTN
 import Unison.Hash qualified as Hash
 import Unison.Reference (Reference)
@@ -278,9 +280,12 @@ compileGroupWithLifted (Rec localDefs entry) liftedGroups exportName = do
       userFuncs = liftedFuncs ++ localFuncs ++ [entryFunc]
       tableFuncs = map funcName userFuncs
 
-  -- Collect foreign calls from all SuperGroups
+  -- Collect FFI calls (foreign functions + debug primitives)
   let allForeignCalls = collectForeignCallsFromGroups (Rec localDefs entry) liftedGroups
-      imports = foreignFuncsToImports allForeignCalls
+      foreignImports = foreignFuncsToImports allForeignCalls
+      allDebugBuiltins = collectDebugBuiltinsFromGroups (Rec localDefs entry) liftedGroups
+      debugImports = debugBuiltinsToImports allDebugBuiltins
+      imports = foreignImports ++ debugImports
 
   pure
     WatModule
@@ -340,9 +345,13 @@ compileMultipleWithLifted entries liftedGroups = do
       userFuncs = liftedFuncs ++ allLocalFuncs ++ allEntryFuncs
       tableFuncs = map funcName userFuncs
 
-  -- Collect foreign calls from all SuperGroups
+  -- Collect FFI calls (foreign functions + debug primitives)
   let allForeignCalls = concatMap (\(sg, _) -> collectForeignCallsFromGroups sg liftedGroups) entries
-      imports = foreignFuncsToImports allForeignCalls
+      foreignImports = foreignFuncsToImports allForeignCalls
+      allDebugBuiltins = concatMap (\(sg, _) -> collectDebugBuiltinsFromGroups sg liftedGroups) entries
+      debugImports = debugBuiltinsToImports (nub allDebugBuiltins)
+      imports = foreignImports ++ debugImports
+      nub = map head . groupBy (==) . sort
 
   pure
     WatModule
@@ -438,6 +447,7 @@ compileSuperNormalWithRefCtx funcNames funcArities refNames refArities refTableI
       helperLocals =
         [ ("__pap_temp", I32)       -- PAp allocation
         , ("__datag_temp", I32)     -- DataG allocation
+        , ("__text_temp", I32)      -- Text literal allocation
         , ("__cont_ptr", I32)       -- Continuation pointer (TKon)
         , ("__k_start", I32)        -- TShift: K chain start
         , ("__k_walk", I32)         -- TShift: K walk pointer
@@ -495,6 +505,7 @@ compileSuperNormalWithCtx funcNames _currentFunc (Lambda mems body) name = do
       helperLocals =
         [ ("__pap_temp", I32)       -- PAp allocation
         , ("__datag_temp", I32)     -- DataG allocation
+        , ("__text_temp", I32)      -- Text literal allocation
         , ("__cont_ptr", I32)       -- Continuation pointer (TKon)
         , ("__k_start", I32)        -- TShift: K chain start
         , ("__k_walk", I32)         -- TShift: K walk pointer
@@ -1941,9 +1952,38 @@ compileLit (N n) = pure [I64Const n]
 compileLit (I n) = pure [I64Const (fromIntegral n)]
 compileLit (F f) = pure [F64Const f, I64ReinterpretF64]  -- Store as i64
 compileLit (C c) = pure [I64Const (fromIntegral (fromEnum c))]  -- Unicode codepoint as i64
-compileLit (T _t) = Left $ UnsupportedConstruct "Text literals not yet supported"
+compileLit (T utext) = pure $ compileTextLit utext
 compileLit (LM _) = Left $ UnsupportedConstruct "Term links not yet supported"
 compileLit (LY _) = Left $ UnsupportedConstruct "Type links not yet supported"
+
+-- | Compile a Text literal to WASM instructions.
+--
+-- Strategy: Allocate heap space and store UTF-8 bytes inline.
+-- Uses __text_temp local for the pointer.
+compileTextLit :: UText.Text -> [WatInstr]
+compileTextLit utext =
+  let text = UText.toText utext
+      bytes = BS.unpack (Text.Encoding.encodeUtf8 text)
+      byteLen = fromIntegral (length bytes) :: Word32
+   in [ Comment $ "Text literal: " ++ show (take 20 (Text.unpack text)) ++ if Text.length text > 20 then "..." else ""
+      , -- Allocate text object
+        I32Const byteLen
+      , Call "__alloc_text"
+      , LocalSet "__text_temp"
+      ]
+        ++ concatMap (storeByteAt (fromIntegral ABI.textDataOffset)) (zip [0 ..] bytes)
+        ++
+        -- Return pointer as i64
+        [ LocalGet "__text_temp"
+        , I64ExtendI32U
+        ]
+  where
+    storeByteAt :: Word32 -> (Int, Word8) -> [WatInstr]
+    storeByteAt baseOffset (idx, byte) =
+      [ LocalGet "__text_temp"
+      , I32Const (fromIntegral byte)
+      , I32Store8 (baseOffset + fromIntegral idx)
+      ]
 
 --------------------------------------------------------------------------------
 -- Primitive Operation Compilation
@@ -1982,6 +2022,9 @@ compilePrimOp DIVF 2 = pure F64Div
 compilePrimOp LEQF 2 = pure F64Le
 compilePrimOp LESF 2 = pure F64Lt
 compilePrimOp EQLF 2 = pure F64Eq
+-- Debug operations (FFI calls)
+compilePrimOp TRCE 2 = pure $ Call "Debug_trace"  -- (Text, a) -> ()
+compilePrimOp PRNT 1 = pure $ Call "Debug_watch"  -- Text -> Text
 -- Unsupported operations
 compilePrimOp op _n = Left $ UnsupportedPrimOp op
 
@@ -2033,6 +2076,9 @@ builtinToPrimOp "Float./" 2 = Just $ floatBinOp F64Div
 builtinToPrimOp "Float.<=" 2 = Just $ floatCmpOp F64Le
 builtinToPrimOp "Float.<" 2 = Just $ floatCmpOp F64Lt
 builtinToPrimOp "Float.==" 2 = Just $ floatCmpOp F64Eq
+-- Debug operations (FFI calls)
+builtinToPrimOp "Debug.trace" 2 = Just [Call "Debug_trace"]
+builtinToPrimOp "Debug.watch" 2 = Just [Call "Debug_watch"]
 -- Unknown builtin
 builtinToPrimOp _ _ = Nothing
 
@@ -2151,6 +2197,81 @@ collectForeignCallsFromSuperGroup (Rec localDefs entry) =
   let entryCalls = collectForeignCallsFromSuperNormal entry
       localCalls = concatMap (collectForeignCallsFromSuperNormal . snd) localDefs
    in entryCalls ++ localCalls
+
+-- | Debug builtins that need FFI imports
+debugBuiltinNames :: [Text]
+debugBuiltinNames = ["Debug.trace", "Debug.watch"]
+
+-- | Collect debug primitives/builtins that need FFI imports.
+-- Collects both TPrm (TRCE, PRNT) and TApp (FComb (Builtin "Debug.trace")) calls.
+collectDebugBuiltins :: (Var v) => ANormal Reference v -> [Text]
+collectDebugBuiltins = nub . go
+  where
+    go (TPrm TRCE _) = ["Debug.trace"]
+    go (TPrm PRNT _) = ["Debug.watch"]
+    go (TApp (FComb (Reference.Builtin name)) _)
+      | name `elem` debugBuiltinNames = [name]
+    go (TLets _ _ _ binding body) = go binding ++ go body
+    go (TMatch _ branches) = goBranches branches
+    go (THnd _ _ _ body) = go body
+    go (TShift _ _ body) = go body
+    go (ABTN.Term _ (ABTN.Abs _ inner)) = go inner
+    go _ = []
+
+    goBranches (MatchIntegral cases def) =
+      concatMap go (map snd $ EC.mapToList cases) ++ maybe [] go def
+    goBranches (MatchNumeric _ cases def) =
+      concatMap go (map snd $ EC.mapToList cases) ++ maybe [] go def
+    goBranches (MatchData _ cases def) =
+      concatMap (\(_, (_, body)) -> go body) (EC.mapToList cases) ++ maybe [] go def
+    goBranches MatchEmpty = []
+    goBranches (MatchRequest _ _) = []
+    goBranches (MatchText cases def) =
+      concatMap go (Map.elems cases) ++ maybe [] go def
+    goBranches (MatchSum cases) =
+      concatMap (\(_, (_, body)) -> go body) (EC.mapToList cases)
+
+    nub = map head . groupBy (==) . sort
+
+-- | Collect debug builtins from a SuperGroup.
+collectDebugBuiltinsFromSuperGroup :: (Var v) => SuperGroup Reference v -> [Text]
+collectDebugBuiltinsFromSuperGroup (Rec localDefs entry) =
+  let entryCalls = collectDebugBuiltinsFromSuperNormal entry
+      localCalls = concatMap (collectDebugBuiltinsFromSuperNormal . snd) localDefs
+   in entryCalls ++ localCalls
+
+-- | Collect debug builtins from a SuperNormal.
+collectDebugBuiltinsFromSuperNormal :: (Var v) => SuperNormal Reference v -> [Text]
+collectDebugBuiltinsFromSuperNormal (Lambda _ body) = collectDebugBuiltins body
+
+-- | Collect debug builtins from all groups.
+collectDebugBuiltinsFromGroups ::
+  (Var v) =>
+  SuperGroup Reference v ->
+  [(Reference, SuperGroup Reference v)] ->
+  [Text]
+collectDebugBuiltinsFromGroups mainGroup liftedGroups =
+  let mainCalls = collectDebugBuiltinsFromSuperGroup mainGroup
+      liftedCalls = concatMap (collectDebugBuiltinsFromSuperGroup . snd) liftedGroups
+   in nub (mainCalls ++ liftedCalls)
+  where
+    nub = map head . groupBy (==) . sort
+
+-- | Generate imports for debug builtins.
+debugBuiltinsToImports :: [Text] -> [WatImport]
+debugBuiltinsToImports = map toImport
+  where
+    toImport "Debug.trace" = WatImport
+      { importModule = "ffi"
+      , importName = "Debug_trace"
+      , importKind = ImportFunc "Debug_trace" [I64, I64] [I64]  -- (text, val) -> unit
+      }
+    toImport "Debug.watch" = WatImport
+      { importModule = "ffi"
+      , importName = "Debug_watch"
+      , importKind = ImportFunc "Debug_watch" [I64] [I64]  -- text -> text
+      }
+    toImport name = error $ "debugBuiltinsToImports: unexpected builtin: " ++ Text.unpack name
 
 -- | Collect foreign calls from a SuperNormal.
 collectForeignCallsFromSuperNormal :: (Var v) => SuperNormal Reference v -> [ForeignFunc]

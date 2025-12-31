@@ -420,6 +420,64 @@ allocCapturedFunction =
     }
 
 --------------------------------------------------------------------------------
+-- Text Allocator
+--------------------------------------------------------------------------------
+
+-- | Text allocation: @__alloc_text(byte_len: i32) -> i32@
+--
+-- Allocates a Text object with space for the given number of UTF-8 bytes.
+-- Layout:
+--   bytes 0-7:   Header (ObjTag=TEXT, size)
+--   bytes 8-11:  ByteLen (u32)
+--   bytes 12-15: CharLen (u32, set to 0 - caller can update)
+--   bytes 16+:   UTF-8 bytes
+--
+-- Caller is responsible for writing the actual bytes at ptr+16.
+allocTextFunction :: WatFunction
+allocTextFunction =
+  WatFunction
+    { funcName = "__alloc_text",
+      funcParams = [("byte_len", I32)],
+      funcLocals = [("ptr", I32), ("size", I32)],
+      funcResults = [I32],
+      funcBody =
+        [ Comment "Allocate Text: header + bytelen + charlen + data",
+          -- size = textBaseSize + align8(byte_len)
+          I32Const (fromIntegral ABI.textBaseSize),
+          LocalGet "byte_len",
+          I32Const 7,
+          I32Add,
+          I32Const 0xFFFFFFF8, -- -8 as unsigned
+          I32And,
+          I32Add,
+          LocalSet "size",
+          -- Allocate
+          LocalGet "size",
+          Call "__alloc",
+          LocalSet "ptr",
+          -- Write header: (OBJ_TEXT << 48) | size
+          LocalGet "ptr",
+          I64Const (fromIntegral (ABI.objTagToWord16 ABI.objText)),
+          I64Const 48,
+          I64Shl,
+          LocalGet "size",
+          I64ExtendI32U,
+          I64Or,
+          I64Store 0,
+          -- Write byte_len at offset 8
+          LocalGet "ptr",
+          LocalGet "byte_len",
+          I32Store (fromIntegral ABI.textLengthOffset),
+          -- Write char_len = 0 at offset 12 (placeholder)
+          LocalGet "ptr",
+          I32Const 0,
+          I32Store 12,
+          -- Return pointer (caller writes bytes at ptr+16)
+          LocalGet "ptr"
+        ]
+    }
+
+--------------------------------------------------------------------------------
 -- Apply Functions (Generated)
 --------------------------------------------------------------------------------
 
@@ -871,6 +929,7 @@ runtimeFunctions =
     allocData2Function,
     allocDataGFunction,
     allocCapturedFunction,
+    allocTextFunction,
     allocPushFrameFunction,
     allocMarkFrameFunction,
     -- DEnv functions

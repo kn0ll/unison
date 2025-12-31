@@ -24,3 +24,4 @@ export {
 export * from './wasm-alloc.js';
 export * from './wasm-debug.js';
 export * from './runtime.js';
+export * from './ffi.js';
