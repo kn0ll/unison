@@ -15,7 +15,7 @@ import { existsSync } from 'fs';
 import { readFile } from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { UnisonRuntime } from '@unison/wasm-runtime';
+import { UnisonRuntime, FunctionSignatures } from '@unison/wasm-runtime';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -24,6 +24,18 @@ const app = express();
 const PORT = parseInt(process.env.PORT || '3001');
 
 let runtime: UnisonRuntime | null = null;
+
+/**
+ * Call a Unison function and parse the DataG result as a tuple.
+ */
+async function runTyped<K extends keyof FunctionSignatures>(
+  funcName: K,
+  ...args: FunctionSignatures[K] extends (...a: infer A) => any ? A : never[]
+): Promise<FunctionSignatures[K] extends (...a: any[]) => infer R ? R : never> {
+  if (!runtime) throw new Error('Runtime not loaded');
+  const ptr = await (runtime as any).run(funcName, ...args);
+  return runtime.readDataGFields(Number(ptr)) as any;
+}
 
 /**
  * Load the WASM module using UnisonRuntime
@@ -97,8 +109,8 @@ app.get('/api/price', async (req, res) => {
     const delayMicros = BigInt(delayMs * 1000);
     const startTime = Date.now();
 
-    // Call calculatePrice - fully typed, returns [bigint, bigint, bigint]
-    const [subtotal, discount, total] = await runtime.run('calculatePrice', delayMicros, BigInt(qty));
+    // Call calculatePrice - fully typed via runTyped
+    const [subtotal, discount, total] = await runTyped('calculatePrice', delayMicros, BigInt(qty));
     const elapsed = Date.now() - startTime;
 
     res.json({

@@ -13,11 +13,22 @@
 /// <reference path="./dist/pricing.d.ts" />
 import type { UnisonRuntime as IUnisonRuntime, FunctionSignatures } from '@unison/wasm-runtime';
 
-// Extract return type for calculatePrice from generated signatures
-type PriceResult = FunctionSignatures['calculatePrice'] extends (...args: any[]) => infer R ? R : never;
-
 // UnisonRuntime constructor is available globally (loaded via script tag)
 declare const UnisonRuntime: new () => IUnisonRuntime;
+
+/**
+ * Call a Unison function and parse the DataG result as a tuple.
+ * This bridges the gap between WASM (returns pointer) and TypeScript (expects tuple).
+ */
+async function runTyped<K extends keyof FunctionSignatures>(
+  funcName: K,
+  ...args: FunctionSignatures[K] extends (...a: infer A) => any ? A : never[]
+): Promise<FunctionSignatures[K] extends (...a: any[]) => infer R ? R : never> {
+  if (!runtime) throw new Error('Runtime not loaded');
+  // run() returns a pointer, readDataGFields parses the DataG object
+  const ptr = await (runtime as any).run(funcName, ...args);
+  return runtime.readDataGFields(Number(ptr)) as any;
+}
 
 let runtime: IUnisonRuntime | null = null;
 
@@ -142,8 +153,8 @@ async function updatePrice(): Promise<void> {
   qtyDisplay.textContent = String(qty);
 
   // Call the actual Unison WASM function!
-  // Fully typed: runtime.run() returns PriceResult = [bigint, bigint, bigint]
-  const [subtotal, discount, total] = await runtime.run('calculatePrice', delayMicros, BigInt(qty));
+  // Fully typed: runTyped() returns PriceResult = [bigint, bigint, bigint]
+  const [subtotal, discount, total] = await runTyped('calculatePrice', delayMicros, BigInt(qty));
 
   // Update UI - no parsing, no duplication, straight from Unison!
   subtotalEl.textContent = formatCents(Number(subtotal));
