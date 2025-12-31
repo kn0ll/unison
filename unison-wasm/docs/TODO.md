@@ -32,20 +32,24 @@ a + b
 
 ### TypeScript Generation: Wire Up
 
-**Current:** `TypeScript.hs` exists but isn't called from compiler. Manual parsing required:
+**Current:** `TypeScript.hs` exists but isn't called from compiler. No type safety:
 ```typescript
-// Manual (bad):
-const fields = runtime.readDataGFields(ptr);  // bigint[]
-return { subtotal: fields[0], discount: fields[1], total: fields[2] };
+const result = await runtime.run('calculatePriceWithDelay', 1000n, 5n);
+// result: bigint (untyped)
 ```
 
-**Problem:** No type safety, manual parsing for every record type.
-
-**Fix:** Wire up `TypeScript.hs` to emit types during compile:
+**Fix:** Generate type definitions that make `run()` type-safe:
 ```typescript
-// Generated (good):
+// GENERATED:
 export type PriceResult = [bigint, bigint, bigint];
-export function read_PriceResult(ptr: bigint): PriceResult;
+
+export interface FunctionSignatures {
+  'calculatePriceWithDelay': (delay: bigint, qty: bigint) => PriceResult;
+}
+
+// USAGE (fully typed, no manual parsing):
+const result = await runtime.run('calculatePriceWithDelay', 1000n, 5n);
+// result: PriceResult ✓
 ```
 
 ---
