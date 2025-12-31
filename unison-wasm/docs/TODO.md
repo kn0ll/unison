@@ -30,6 +30,26 @@ a + b
 
 ---
 
+### TypeScript Generation: Wire Up
+
+**Current:** `TypeScript.hs` exists but isn't called from compiler. Manual parsing required:
+```typescript
+// Manual (bad):
+const fields = runtime.readDataGFields(ptr);  // bigint[]
+return { subtotal: fields[0], discount: fields[1], total: fields[2] };
+```
+
+**Problem:** No type safety, manual parsing for every record type.
+
+**Fix:** Wire up `TypeScript.hs` to emit types during compile:
+```typescript
+// Generated (good):
+export type PriceResult = [bigint, bigint, bigint];
+export function read_PriceResult(ptr: bigint): PriceResult;
+```
+
+---
+
 ### Performance Optimizations
 
 | Current | Cost | Optimization |
