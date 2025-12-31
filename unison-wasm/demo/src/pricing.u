@@ -1,14 +1,108 @@
+use lib.unison_http_11_0_0
+use lib.unison_base_7_10_0
+use lib.unison_json_1_3_5
+
 type PriceResult = { subtotal: Nat, discount: Nat, total: Nat }
 
 calculatePrice : Nat -> Nat -> PriceResult
 calculatePrice delayMicros quantity =
-  _ = Debug.trace "calculating price" ()
   _ = ##IO.delay.impl.v3 delayMicros
-  _ = Debug.trace "calculation complete" ()
-
-  unitPrice = 1000  -- $10.00 in cents
+  unitPrice = 1000
   subtotal = quantity * unitPrice
   discount = if quantity >= 5 then subtotal / 10 else 0
   total = subtotal - discount
-
   PriceResult subtotal discount total
+
+priceResultToJson : PriceResult -> Text
+priceResultToJson result =
+  Json.object.empty
+    |> Json.object.addNat "subtotal" (PriceResult.subtotal result)
+    |> Json.object.addNat "discount" (PriceResult.discount result)
+    |> Json.object.addNat "total" (PriceResult.total result)
+    |> Json.toText
+
+getQueryParamNat : Text -> Nat -> Query -> Nat
+getQueryParamNat key default query =
+  Query.getParam key query
+    |> List.head
+    |> Optional.flatMap Nat.fromText
+    |> Optional.getOrElse default
+
+priceHandler : Handler IO
+priceHandler = Handler cases
+  req | Routes.get (root Path./ "api" Path./ "price") req ->
+    rawQuery = URI.query (HttpRequest.uri req)
+    match Query.fromRawQuery rawQuery with
+      None -> ok (Body.fromText "{\"error\":\"invalid query\"}")
+      Some query ->
+        qty = getQueryParamNat "qty" 1 query
+        delayMs = getQueryParamNat "delay" 0 query
+        delayMicros = delayMs * 1000
+        result = calculatePrice delayMicros qty
+        jsonResponse = priceResultToJson result
+        HttpResponse.ok (Body.fromText jsonResponse)
+          |> HttpResponse.addHeader "Content-Type" "application/json"
+          |> HttpResponse.addHeader "Access-Control-Allow-Origin" "*"
+  _ -> abort
+
+mimeType : Text -> Text
+mimeType filename =
+  ext = Text.takeEndWhile (c -> not (c == ?.)) filename
+  match ext with
+    "html" -> "text/html; charset=utf-8"
+    "css"  -> "text/css; charset=utf-8"
+    "js"   -> "application/javascript; charset=utf-8"
+    "json" -> "application/json"
+    "png"  -> "image/png"
+    "jpg"  -> "image/jpeg"
+    "jpeg" -> "image/jpeg"
+    "gif"  -> "image/gif"
+    "svg"  -> "image/svg+xml"
+    "ico"  -> "image/x-icon"
+    "wasm" -> "application/wasm"
+    "woff" -> "font/woff"
+    "woff2" -> "font/woff2"
+    "ttf"  -> "font/ttf"
+    "map"  -> "application/json"
+    _      -> "application/octet-stream"
+
+staticHandler : FilePath -> Handler IO
+staticHandler root = Handler cases
+  req | HttpRequest.method req === GET ->
+    uri = HttpRequest.uri req
+    pathSegments = match URI.path uri with
+      Path segs -> segs
+    requestPath = Text.join "/" pathSegments
+    safePath = if requestPath == "" then "index.html" else requestPath
+    filePath = root FilePath./ safePath
+    if FilePath.exists filePath then
+      if FilePath.isDirectory filePath then
+        indexPath = filePath FilePath./ "index.html"
+        if FilePath.exists indexPath then
+          bytes = FilePath.readFile indexPath
+          HttpResponse.ok (Body.Body bytes)
+            |> HttpResponse.addHeader "Content-Type" (mimeType "index.html")
+        else abort
+      else
+        bytes = FilePath.readFile filePath
+        HttpResponse.ok (Body.Body bytes)
+          |> HttpResponse.addHeader "Content-Type" (mimeType safePath)
+    else abort
+  _ -> abort
+
+server.main : '{IO, Exception} ()
+server.main = do
+  printLine "🦄 Starting Unison pricing server on http://localhost:8080"
+  printLine ""
+  printLine "Endpoints:"
+  printLine "  GET /api/price?qty=5&delay=500"
+  printLine "  GET /* (static files from ./public)"
+  printLine ""
+  printLine "This uses the SAME calculatePrice function as the browser WASM!"
+  printLine ""
+  config = server.Config.default |> server.Config.port.set (Port "8080")
+  staticRoot = FilePath "./public"
+  routes = Routes.default <<< priceHandler <<< staticHandler staticRoot
+  Random.run do
+    Threads.run do
+      server.runServer config (Routes.toFunction routes)
