@@ -147,8 +147,7 @@ function updatePrice(): void {
   // Call all WASM functions - compiled from Unison
   const subtotal = Number(runtime.call('calculateSubtotal', qty));
   const discount = Number(runtime.call('calculateDiscount', qty));
-  // Use calculatePriceWithLog to demonstrate FFI (Debug.trace logs to console)
-  const total = Number(runtime.call('calculatePriceWithLog', qty));
+  const total = Number(runtime.call('calculatePriceWithDelay', qty, 0));
 
   // Update UI
   qtyDisplay.textContent = qtySlider.value;

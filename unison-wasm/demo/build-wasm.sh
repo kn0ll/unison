@@ -45,7 +45,7 @@ LANG=C.UTF-8 LC_ALL=C.UTF-8 stack exec unison-wasm-poc -- \
     --codebase "$CODEBASE_DIR" \
     --project demo \
     --branch main \
-    calculatePrice calculateDiscount calculateSubtotal calculatePriceWithLog calculatePriceWithDelay > "$DIST_DIR/pricing.wat" || {
+    calculatePrice calculateDiscount calculateSubtotal calculatePriceWithDelay > "$DIST_DIR/pricing.wat" || {
   echo "Error: Compilation failed"
   exit 1
 }
