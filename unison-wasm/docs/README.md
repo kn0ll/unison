@@ -16,8 +16,8 @@ npm run dev
 The demo shows a Price Calculator where:
 - **Browser** calculates prices instantly (WASM)
 - **Server** verifies with the same WASM module
-- **Drift Mode** simulates what happens with duplicated code
-- **Foreign Calls** (`IO.printNat`) log to console in both environments
+- **Async FFI** (`IO.delay`) demonstrates yield/resume with real delays
+- **Debug.trace** logs to console in both environments
 
 ### Run Tests
 
@@ -144,10 +144,10 @@ unison-wasm/
 
 | Document | Purpose |
 |----------|---------|
-| [ABI.md](./ABI.md) | Memory layout, TypedSlot, heap objects |
-| [FFI.md](./FFI.md) | Foreign function interface specification |
-| [ASYNC.md](./ASYNC.md) | Async yield/resume implementation strategy |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | FFI, async, memory layout — the canonical reference |
+| [ABI.md](./ABI.md) | Memory layout details (TypedSlot, heap objects) |
 | [PRIMITIVES.md](./PRIMITIVES.md) | Unison primitives for WASM |
+| [MAPS.md](./MAPS.md) | Map support strategy |
 | [TODO.md](./TODO.md) | Known limitations, future work |
 
 ---

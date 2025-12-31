@@ -16,7 +16,7 @@ The current implementation (v0.1.0) is a **proof of concept**. It demonstrates t
 | Abilities (effects) with capture/resume | ✅ E2E verified |
 | Sync foreign calls to JavaScript | ✅ Working |
 | Async JS infrastructure | ✅ Built (yield protocol, ContinuationHandle) |
-| **Async compiler support** | ❌ Missing (see below) |
+| **Async compiler support** | ✅ Complete (state machine transformation) |
 | Same WASM in browser + Node | ✅ Demo works (sync FFI) |
 
 ### What's Missing for v1.0
@@ -27,7 +27,7 @@ The current implementation (v0.1.0) is a **proof of concept**. It demonstrates t
 
 ### FFI Implementation Status
 
-See [FFI.md](./FFI.md) for the complete design.
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for the complete design.
 
 #### Working Now
 
@@ -35,19 +35,15 @@ See [FFI.md](./FFI.md) for the complete design.
 |----------------|-----|-------------|---------------------|
 | `Debug.trace` | `TApp (FComb (Builtin "Debug.trace"))` | `call $Debug_trace` | `console.log("[trace]", text)` ✅ |
 | `Debug.watch` | `TApp (FComb (Builtin "Debug.watch"))` | `call $Debug_watch` | `console.log("[watch]", text)` ✅ |
+| `IO.delay.impl.v3` | `TFOp (Builtin "IO.delay.impl.v3")` | `call $IO_delay_impl_v3` | `setTimeout` (async) ✅ |
 
 #### Next Phase
 
 | Task | Description | Status |
 |------|-------------|--------|
-| **Compiler yield-check** | Emit yield check after `TFOp` calls | ❌ Blocking |
-| `IO.delay.impl.v3` | Async delay (needs yield-check) | ⏳ Blocked |
 | `IO.putBytes.impl.v3` | `console.log` / stdout (sync) | ⏳ Easy |
-| HTTP via sockets | Complex - see FFI.md | ⏳ Phase 4 |
-
-**Blocking issue:** The compiler doesn't generate yield-checking code after FFI calls.
-WASM treats `YIELD_SENTINEL` as a normal value and continues executing.
-See "Async Handling" section below for required compiler changes.
+| `IO.randomBytes.impl.v1` | `crypto.getRandomValues` | ⏳ Easy |
+| HTTP via sockets | Complex — may need special browser handling | ⏳ Future |
 
 #### Socket → Fetch Mapping (Significant Work)
 
@@ -131,43 +127,11 @@ The MVP prioritizes correctness and debuggability over performance. These known 
 | No nested async | Blocks sequential fetches | Queue pending ForeignCall requests |
 | Single continuation in-flight | Can't overlap I/O | Structured async regions |
 
-#### Current Status: Async FFI Not Yet Functional
+**Status: ✅ Complete**
 
-The JS runtime infrastructure for async (yield/resume, continuation handles) is built, but the
-**compiler doesn't yet generate the required yield-checking code**.
+The compiler generates yield-checking code after FFI calls, saves/restores locals via `AsyncCont`, and uses state machine transformation for resume.
 
-**What happens now:**
-```wat
-call $IO_delay_impl_v3    ;; FFI returns YIELD_SENTINEL
-local.set $p5             ;; ← WASM stores it as normal value and continues!
-call $Debug_trace         ;; ← Executes immediately, doesn't wait
-```
-
-**What's needed:**
-```wat
-call $IO_delay_impl_v3
-local.tee $p5
-i64.const YIELD_SENTINEL
-i64.eq
-if (result i64)
-  ;; Save all live locals to Captured object
-  ;; Return YIELD_SENTINEL to caller
-  ...
-  return
-end
-;; Normal path continues here
-```
-
-**Required compiler changes:**
-1. After every `TFOp` call, emit yield-check code
-2. Generate local-saving code (similar to `THnd` continuation capture)
-3. Each yield point needs a unique "resume label" for `__resume` to jump to
-4. `__resume` must restore locals and branch to the correct resume point
-
-This is essentially implementing **delimited continuations** at the WASM level.
-See `compileANormal` case for `TFOp` in `Compile.hs` (currently just `Call funcName`).
-
-**📋 Full implementation plan:** See **[ASYNC.md](./ASYNC.md)** for phased strategy and exit criteria.
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full design.
 
 ### Code Generation
 
