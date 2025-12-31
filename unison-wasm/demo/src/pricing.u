@@ -16,10 +16,10 @@ calculatePrice delayMicros quantity =
   _ = Debug.trace "calculating price" ()
   _ = ##IO.delay.impl.v3 delayMicros
   _ = Debug.trace "calculation complete" ()
-  
+
   unitPrice = 1000  -- $10.00 in cents
   subtotal = quantity * unitPrice
   discount = if quantity >= 5 then subtotal / 10 else 0
   total = subtotal - discount
-  
+
   PriceResult subtotal discount total
