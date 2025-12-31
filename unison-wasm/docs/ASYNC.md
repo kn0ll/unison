@@ -1,7 +1,7 @@
 # Async FFI — Design & Implementation Strategy
 
-**Version:** 0.1.0 (Draft)
-**Status:** Planning
+**Version:** 0.2.0
+**Status:** Phase 2 Complete (Local State Saving)
 
 This document defines the strategy for implementing true async/await semantics for Unison WASM FFI calls. It covers the current state, target design, implementation phases, and strict exit criteria.
 
@@ -57,18 +57,20 @@ Implement **delimited continuations at the WASM level** for async FFI calls. Thi
 | `AsyncState` enum | ✅ Implemented | `Idle`, `Yielded`, `Resuming` |
 | `ContinuationHandle` class | ✅ Implemented | Exactly-once enforcement |
 | `__resume` export | ✅ Stub exists | Validates cont_id, returns value |
-| `__alloc_async_cont` | ✅ Implemented | Allocates 32-byte AsyncCont object |
+| `__alloc_async_cont` | ✅ Implemented | Allocates 40-byte AsyncCont with locals |
 | Nested async guard | ✅ Implemented | `NestedAsyncError` thrown |
+| Yield checking | ✅ Phase 1 | Compiler checks for `YIELD_SENTINEL` |
+| Local saving | ✅ Phase 2 | Compiler emits local-saving code |
+| `func_idx` + `resume_label` | ✅ Phase 2 | Stored in AsyncCont object |
 
 ### What's Broken ❌
 
 | Component | Status | Issue |
 |-----------|--------|-------|
-| Yield checking | ❌ Missing | Compiler doesn't check return value |
-| Local saving | ❌ Missing | No code to save locals on yield |
-| Resume labels | ❌ Missing | No way to resume mid-function |
+| Resume dispatch | ❌ Missing | `__resume` doesn't jump to resume point |
+| Local restoring | ❌ Missing | Saved locals not restored on resume |
 | K-stack integration | ❌ Missing | Async yield doesn't push K frame |
-| `__resume` body | ❌ Stub only | Doesn't restore state or jump |
+| `__resume` body | ❌ Stub only | Doesn't restore state or dispatch |
 
 ### Current Code Path
 
@@ -360,21 +362,27 @@ Each function with yield points needs a resume dispatcher at the top:
 
 ---
 
-### Phase 2: Local State Saving
+### Phase 2: Local State Saving ✅ COMPLETE
 
 **Goal:** Save all locals when yielding.
 
 **Tasks:**
-1. Count locals at each yield point (`getSaveableLocalCount`)
-2. Allocate locals array in AsyncCont (dynamic size)
-3. Emit local-saving code before `return YIELD_SENTINEL`
-4. Store func_idx and resume_label in AsyncCont
+1. Count locals at each yield point (`getSaveableLocalCount`) ✅
+2. Allocate locals array in AsyncCont (dynamic size) ✅
+3. Emit local-saving code before `return YIELD_SENTINEL` ✅
+4. Store func_idx and resume_label in AsyncCont ✅
+
+**Implementation Notes:**
+- Changed `compileANormal` to return `([WatInstr], CompileCtx v)` to thread context
+- `allocYieldPoint` assigns unique IDs per function
+- `ffiCallWithYieldCheckFull` emits complete local-saving code
+- AsyncCont now 40 bytes with `func_idx` and `resume_label` fields
 
 **Exit Criteria:**
-- [ ] Locals saved to heap on yield
-- [ ] AsyncCont object created with correct data
-- [ ] JS can read saved locals
-- [ ] Unit test: `test-local-saving.js` passes
+- [x] Locals saved to heap on yield
+- [x] AsyncCont object created with correct data
+- [x] JS can read saved locals
+- [x] Unit test: Phase 2 tests in `async.test.ts` pass (119 total tests)
 
 ---
 

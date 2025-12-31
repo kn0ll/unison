@@ -26,6 +26,12 @@ import {
   OBJ_ASYNC_CONT,
   ASYNC_STATUS_PENDING,
   ASYNC_STATUS_RESUMED,
+  ASYNC_CONT_ID_OFFSET,
+  ASYNC_CONT_LOCALS_PTR_OFFSET,
+  ASYNC_CONT_LOCALS_COUNT_OFFSET,
+  ASYNC_CONT_FUNC_IDX_OFFSET,
+  ASYNC_CONT_RESUME_LABEL_OFFSET,
+  ASYNC_CONT_STATUS_OFFSET,
 } from '../abi-constants.js';
 
 // =============================================================================
@@ -450,6 +456,330 @@ describe('WASM Yield Check (Phase 1)', () => {
 
     assert.strictEqual(traceWasCalled, true, 'Debug_trace should be called');
     assert.strictEqual(result, 0n, 'Should return Unit (0)');
+  });
+});
+
+// =============================================================================
+// Phase 2: Local State Saving Tests
+// =============================================================================
+
+describe('Phase 2: Local State Saving', () => {
+  before(async () => {
+    // Ensure wabt is loaded (uses shared instantiateWatWithImports helper)
+    const wabt = await import('wabt');
+    await (wabt.default as unknown as () => Promise<WabtModule>)();
+  });
+
+  it('saves all locals when yielding', async () => {
+    // This WAT simulates what the compiler generates for Phase 2:
+    // - Has multiple locals set before the FFI call
+    // - When FFI returns YIELD_SENTINEL, saves locals to array
+    // - Creates AsyncCont with func_idx and resume_label
+    const wat = `(module
+      ;; FFI that yields (imports must come first)
+      (import "ffi" "async_op" (func $async_op (result i64)))
+
+      ;; Memory for heap
+      (memory (export "memory") 1)
+
+      ;; Globals for runtime state
+      (global $heap_ptr (mut i32) (i32.const 1024))
+      (global $k_ptr (mut i32) (i32.const 0))
+      (global $async_cont_id (mut i64) (i64.const 0))
+      (global $async_cont_ptr (export "async_cont_ptr") (mut i32) (i32.const 0))
+
+      ;; Simple allocator
+      (func $__alloc (param $size i32) (result i32)
+        (local $ptr i32)
+        global.get $heap_ptr
+        local.set $ptr
+        global.get $heap_ptr
+        local.get $size
+        i32.add
+        global.set $heap_ptr
+        local.get $ptr
+      )
+
+      ;; Allocate locals array (each slot is 8 bytes for i64)
+      (func $__alloc_locals_array (export "__alloc_locals_array") (param $count i32) (result i32)
+        local.get $count
+        i32.const 8
+        i32.mul
+        call $__alloc
+      )
+
+      ;; Allocate async cont object
+      ;; Args: cont_id (i64), k_ptr (i32), locals_ptr (i32), locals_count (i32), func_idx (i32), resume_label (i32)
+      (func $__alloc_async_cont (export "__alloc_async_cont")
+            (param $cont_id i64) (param $k_ptr i32) (param $locals_ptr i32)
+            (param $locals_count i32) (param $func_idx i32) (param $resume_label i32) (result i32)
+        (local $ptr i32)
+        ;; Allocate 40 bytes for AsyncCont
+        i32.const 40
+        call $__alloc
+        local.set $ptr
+
+        ;; Store header (8 bytes: version=0, obj_tag=0x00b, size=40)
+        local.get $ptr
+        i64.const 0x0000002800B00000  ;; size=40, tag=0x00b, version=0
+        i64.store
+
+        ;; Store cont_id at offset 8
+        local.get $ptr
+        local.get $cont_id
+        i64.store offset=8
+
+        ;; Store k_ptr at offset 16
+        local.get $ptr
+        local.get $k_ptr
+        i32.store offset=16
+
+        ;; Store locals_ptr at offset 20
+        local.get $ptr
+        local.get $locals_ptr
+        i32.store offset=20
+
+        ;; Store locals_count at offset 24
+        local.get $ptr
+        local.get $locals_count
+        i32.store offset=24
+
+        ;; Store func_idx at offset 28
+        local.get $ptr
+        local.get $func_idx
+        i32.store offset=28
+
+        ;; Store resume_label at offset 32
+        local.get $ptr
+        local.get $resume_label
+        i32.store offset=32
+
+        ;; Store status (pending=0) at offset 36
+        local.get $ptr
+        i32.const 0
+        i32.store offset=36
+
+        local.get $ptr
+      )
+
+      ;; Main function with locals that need saving
+      (func $main (export "main") (result i64)
+        (local $x i64)
+        (local $y i64)
+        (local $z i64)
+        (local $__ffi_result i64)
+        (local $__async_locals_ptr i32)
+
+        ;; Set up some locals
+        i64.const 111
+        local.set $x
+        i64.const 222
+        local.set $y
+        i64.const 333
+        local.set $z
+
+        ;; Call FFI
+        call $async_op
+        local.tee $__ffi_result
+
+        ;; Check for YIELD_SENTINEL
+        i64.const -2  ;; YIELD_SENTINEL = 0xFFFFFFFFFFFFFFFE = -2 signed
+        i64.eq
+        if
+          ;; Allocate locals array for 3 locals
+          i32.const 3
+          call $__alloc_locals_array
+          local.set $__async_locals_ptr
+
+          ;; Save local $x at offset 0
+          local.get $__async_locals_ptr
+          local.get $x
+          i64.store offset=0
+
+          ;; Save local $y at offset 8
+          local.get $__async_locals_ptr
+          local.get $y
+          i64.store offset=8
+
+          ;; Save local $z at offset 16
+          local.get $__async_locals_ptr
+          local.get $z
+          i64.store offset=16
+
+          ;; Increment and get continuation ID
+          global.get $async_cont_id
+          i64.const 1
+          i64.add
+          global.set $async_cont_id
+
+          ;; Create AsyncCont: cont_id, k_ptr, locals_ptr, locals_count, func_idx, resume_label
+          global.get $async_cont_id  ;; cont_id
+          global.get $k_ptr          ;; k_ptr
+          local.get $__async_locals_ptr  ;; locals_ptr
+          i32.const 3                ;; locals_count
+          i32.const 42               ;; func_idx (example: function table index 42)
+          i32.const 0                ;; resume_label (yield point 0)
+          call $__alloc_async_cont
+          global.set $async_cont_ptr
+
+          ;; Return YIELD_SENTINEL
+          i64.const -2
+          return
+        end
+
+        ;; Normal path: return result
+        local.get $__ffi_result
+      )
+    )`;
+
+    // Track what we learn about the saved state
+    let yieldCalled = false;
+    const imports: WebAssembly.Imports = {
+      ffi: {
+        async_op: () => {
+          yieldCalled = true;
+          return YIELD_SENTINEL;
+        },
+      },
+    };
+
+    const instance = await instantiateWatWithImports(wat, imports);
+    const main = instance.exports['main'] as () => bigint;
+    const memory = instance.exports['memory'] as WebAssembly.Memory;
+    const asyncContPtr = instance.exports['async_cont_ptr'] as WebAssembly.Global;
+
+    // Call main - it should yield
+    const result = main();
+
+    // Verify yield happened
+    assert.strictEqual(yieldCalled, true, 'FFI should be called');
+    assert.strictEqual(asU64(result), YIELD_SENTINEL, 'Should return YIELD_SENTINEL');
+
+    // Verify AsyncCont was created
+    const contPtr = asyncContPtr.value as number;
+    assert.ok(contPtr > 0, 'AsyncCont should be allocated');
+
+    // Read the AsyncCont fields from memory
+    const view = new DataView(memory.buffer);
+
+    // Read cont_id (i64 at offset 8)
+    const contId = view.getBigUint64(contPtr + ASYNC_CONT_ID_OFFSET, true);
+    assert.strictEqual(contId, 1n, 'Continuation ID should be 1');
+
+    // Read locals_count (i32 at offset 24)
+    const localsCount = view.getUint32(contPtr + ASYNC_CONT_LOCALS_COUNT_OFFSET, true);
+    assert.strictEqual(localsCount, 3, 'Should have saved 3 locals');
+
+    // Read func_idx (i32 at offset 28)
+    const funcIdx = view.getUint32(contPtr + ASYNC_CONT_FUNC_IDX_OFFSET, true);
+    assert.strictEqual(funcIdx, 42, 'Function index should be 42');
+
+    // Read resume_label (i32 at offset 32)
+    const resumeLabel = view.getUint32(contPtr + ASYNC_CONT_RESUME_LABEL_OFFSET, true);
+    assert.strictEqual(resumeLabel, 0, 'Resume label should be 0');
+
+    // Read status (i32 at offset 36)
+    const status = view.getUint32(contPtr + ASYNC_CONT_STATUS_OFFSET, true);
+    assert.strictEqual(status, ASYNC_STATUS_PENDING, 'Status should be pending');
+
+    // Read locals_ptr and verify saved values
+    const localsPtr = view.getUint32(contPtr + ASYNC_CONT_LOCALS_PTR_OFFSET, true);
+    assert.ok(localsPtr > 0, 'Locals pointer should be set');
+
+    // Read saved locals
+    const savedX = view.getBigUint64(localsPtr + 0, true);
+    const savedY = view.getBigUint64(localsPtr + 8, true);
+    const savedZ = view.getBigUint64(localsPtr + 16, true);
+
+    assert.strictEqual(savedX, 111n, 'Local x should be saved as 111');
+    assert.strictEqual(savedY, 222n, 'Local y should be saved as 222');
+    assert.strictEqual(savedZ, 333n, 'Local z should be saved as 333');
+  });
+
+  it('handles sync FFI (no yield) correctly with new code', async () => {
+    // Same structure as above but FFI returns a normal value
+    const wat = `(module
+      ;; Import must come first
+      (import "ffi" "sync_op" (func $sync_op (result i64)))
+
+      (memory (export "memory") 1)
+      (global $heap_ptr (mut i32) (i32.const 1024))
+      (global $k_ptr (mut i32) (i32.const 0))
+      (global $async_cont_id (mut i64) (i64.const 0))
+      (global $async_cont_ptr (export "async_cont_ptr") (mut i32) (i32.const 0))
+
+      (func $__alloc (param $size i32) (result i32)
+        (local $ptr i32)
+        global.get $heap_ptr
+        local.set $ptr
+        global.get $heap_ptr
+        local.get $size
+        i32.add
+        global.set $heap_ptr
+        local.get $ptr
+      )
+
+      (func $__alloc_locals_array (export "__alloc_locals_array") (param $count i32) (result i32)
+        local.get $count
+        i32.const 8
+        i32.mul
+        call $__alloc
+      )
+
+      (func $__alloc_async_cont (export "__alloc_async_cont")
+            (param $cont_id i64) (param $k_ptr i32) (param $locals_ptr i32)
+            (param $locals_count i32) (param $func_idx i32) (param $resume_label i32) (result i32)
+        i32.const 0  ;; Return null - should never be called in sync case
+      )
+
+      (func $main (export "main") (result i64)
+        (local $x i64)
+        (local $y i64)
+        (local $__ffi_result i64)
+        (local $__async_locals_ptr i32)
+
+        i64.const 100
+        local.set $x
+        i64.const 200
+        local.set $y
+
+        call $sync_op
+        local.tee $__ffi_result
+
+        i64.const -2
+        i64.eq
+        if
+          ;; Would save locals here - but sync op doesn't yield
+          i64.const -2
+          return
+        end
+
+        ;; Use locals after FFI - they should still be accessible
+        local.get $x
+        local.get $y
+        i64.add
+        local.get $__ffi_result
+        i64.add  ;; x + y + result
+      )
+    )`;
+
+    const imports: WebAssembly.Imports = {
+      ffi: {
+        sync_op: () => 50n,  // Return normal value, not YIELD_SENTINEL
+      },
+    };
+
+    const instance = await instantiateWatWithImports(wat, imports);
+    const main = instance.exports['main'] as () => bigint;
+    const asyncContPtr = instance.exports['async_cont_ptr'] as WebAssembly.Global;
+
+    const result = main();
+
+    // Should return x + y + result = 100 + 200 + 50 = 350
+    assert.strictEqual(result, 350n, 'Should compute 100 + 200 + 50 = 350');
+
+    // AsyncCont should NOT be created
+    assert.strictEqual(asyncContPtr.value, 0, 'AsyncCont should not be allocated for sync calls');
   });
 });
 

@@ -980,6 +980,7 @@ runtimeFunctions =
     denvInsertFunction,
     -- Async continuation functions
     allocAsyncContFunction,
+    allocLocalsArrayFunction,
     resumeFunction
   ]
     ++ map mkApplyFunction [1 .. 3] -- Generate __apply1, __apply2, __apply3
@@ -988,14 +989,22 @@ runtimeFunctions =
 -- Async Continuation Support
 --------------------------------------------------------------------------------
 
--- | Allocate an async continuation object: @__alloc_async_cont(cont_id, k_ptr, locals_ptr, locals_count) -> i32@
+-- | Allocate an async continuation object:
+-- @__alloc_async_cont(cont_id, k_ptr, locals_ptr, locals_count, func_idx, resume_label) -> i32@
 --
 -- Creates an OBJ_ASYNC_CONT object to store the suspended computation state.
 allocAsyncContFunction :: WatFunction
 allocAsyncContFunction =
   WatFunction
     { funcName = "__alloc_async_cont",
-      funcParams = [("cont_id", I64), ("k_ptr", I32), ("locals_ptr", I32), ("locals_count", I32)],
+      funcParams =
+        [ ("cont_id", I64),
+          ("k_ptr", I32),
+          ("locals_ptr", I32),
+          ("locals_count", I32),
+          ("func_idx", I32),
+          ("resume_label", I32)
+        ],
       funcLocals = [("ptr", I32)],
       funcResults = [I32],
       funcBody =
@@ -1028,11 +1037,41 @@ allocAsyncContFunction =
           LocalGet "ptr",
           LocalGet "locals_count",
           I32Store (fromIntegral ABI.asyncContLocalsCountOffset),
-          -- Write status = PENDING at offset 28
+          -- Write func_idx at offset 28
+          LocalGet "ptr",
+          LocalGet "func_idx",
+          I32Store (fromIntegral ABI.asyncContFuncIdxOffset),
+          -- Write resume_label at offset 32
+          LocalGet "ptr",
+          LocalGet "resume_label",
+          I32Store (fromIntegral ABI.asyncContResumeLabelOffset),
+          -- Write status = PENDING at offset 36
           LocalGet "ptr",
           I32Const (fromIntegral ABI.asyncStatusPending),
           I32Store (fromIntegral ABI.asyncContStatusOffset),
           -- Return ptr
+          LocalGet "ptr"
+        ]
+    }
+
+-- | Allocate a locals array: @__alloc_locals_array(count) -> i32@
+--
+-- Creates a heap block to store N i64 local values.
+-- Each local is stored as 8 bytes (i64).
+allocLocalsArrayFunction :: WatFunction
+allocLocalsArrayFunction =
+  WatFunction
+    { funcName = "__alloc_locals_array",
+      funcParams = [("count", I32)],
+      funcLocals = [("ptr", I32)],
+      funcResults = [I32],
+      funcBody =
+        [ Comment "Allocate locals array (count * 8 bytes)",
+          LocalGet "count",
+          I32Const 8,
+          I32Mul,
+          Call "__alloc",
+          LocalSet "ptr",
           LocalGet "ptr"
         ]
     }

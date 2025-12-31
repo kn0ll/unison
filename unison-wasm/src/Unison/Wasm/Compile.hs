@@ -93,6 +93,7 @@ import Unison.Wasm.Compile.Context
     memToValType,
     refToFuncName,
     sanitizeName,
+    allocYieldPoint,
   )
 import Unison.Wasm.Compile.FFI qualified as FFI
 import Unison.Wasm.Compile.Literal qualified as Literal
@@ -387,6 +388,7 @@ compileSuperNormalWithRefCtx funcNames funcArities refNames refArities refTableI
         , ("__req_arg0", I64)       -- TReq: First arg temp
         , ("__handler_ptr", I32)    -- TReq: Handler pointer from denv
         , ("__ffi_result", I64)     -- TFOp: FFI result for yield check
+        , ("__async_locals_ptr", I32) -- TFOp: Pointer to saved locals array
         ]
       funcLocals' = drop (length mems) (ctxLocals finalCtx) ++ helperLocals
       funcResults = [I64]
@@ -446,6 +448,7 @@ compileSuperNormalWithCtx funcNames _currentFunc (Lambda mems body) name = do
         , ("__req_arg0", I64)       -- TReq: First arg temp
         , ("__handler_ptr", I32)    -- TReq: Handler pointer from denv
         , ("__ffi_result", I64)     -- TFOp: FFI result for yield check
+        , ("__async_locals_ptr", I32) -- TFOp: Pointer to saved locals array
         ]
       -- Locals are all variables bound after the parameters plus helpers
       funcLocals' = drop (length mems) (ctxLocals finalCtx) ++ helperLocals
@@ -470,16 +473,13 @@ unabss bd = ([], bd)
 --------------------------------------------------------------------------------
 
 -- | Compile an ANormal term to WASM instructions (returns updated context for locals)
+-- This is just an alias for compileANormal now that it returns the context.
 compileANormalWithCtx ::
   (Var v) =>
   CompileCtx v ->
   ANormal Reference v ->
   CompileResult ([WatInstr], CompileCtx v)
-compileANormalWithCtx ctx term = do
-  instrs <- compileANormal ctx term
-  -- Extract the final context by traversing the term again
-  let finalCtx = collectLocals ctx term
-  pure (instrs, finalCtx)
+compileANormalWithCtx = compileANormal
 
 -- | Collect all local bindings from an ANormal term
 collectLocals :: (Var v) => CompileCtx v -> ANormal Reference v -> CompileCtx v
@@ -530,22 +530,23 @@ collectLocals ctx (TShift _ref contVar body) =
 collectLocals ctx _ = ctx
 
 -- | Compile an ANormal term to WASM instructions
+-- Returns instructions and updated context (for yield point tracking)
 compileANormal ::
   (Var v) =>
   CompileCtx v ->
   ANormal Reference v ->
-  CompileResult [WatInstr]
+  CompileResult ([WatInstr], CompileCtx v)
 -- Let binding: evaluate binding, store in local, continue with body
 compileANormal ctx (TLets _direct letVars mems binding body) = do
   -- Compile the binding expression
-  bindingInstrs <- compileANormal ctx binding
+  (bindingInstrs, ctx1) <- compileANormal ctx binding
 
   -- Extend context with new variables
-  let ctx' = bindVars (zip letVars mems) ctx
+  let ctx2 = bindVars (zip letVars mems) ctx1
 
   -- Get the local indices for storing results
   let storeInstrs = case letVars of
-        (v : _) -> case lookupVar v ctx' of
+        (v : _) -> case lookupVar v ctx2 of
           Just (i, _) ->
             -- Store result in local (for single-result expressions)
             [LocalSet ("p" ++ show i)]
@@ -553,99 +554,117 @@ compileANormal ctx (TLets _direct letVars mems binding body) = do
         [] -> []
 
   -- Compile the body
-  bodyInstrs <- compileANormal ctx' body
+  (bodyInstrs, ctx3) <- compileANormal ctx2 body
 
-  pure $ bindingInstrs ++ storeInstrs ++ bodyInstrs
+  pure (bindingInstrs ++ storeInstrs ++ bodyInstrs, ctx3)
 
 -- Variable reference: push value onto stack
 compileANormal ctx (TVar v) = do
   case lookupVar v ctx of
-    Just (i, _) -> pure [LocalGet ("p" ++ show i)]
+    Just (i, _) -> pure ([LocalGet ("p" ++ show i)], ctx)
     Nothing -> Left $ UnboundVariable (Var.name v)
 
 -- Literal: push constant onto stack
-compileANormal _ctx (TLit lit) = do
-  compileLit lit
+compileANormal ctx (TLit lit) = do
+  instrs <- compileLit lit
+  pure (instrs, ctx)
 
 -- Boxed literal: same as TLit for now (heap alloc for sum types handled separately)
-compileANormal _ctx (TBLit lit) = do
-  compileLit lit
+compileANormal ctx (TBLit lit) = do
+  instrs <- compileLit lit
+  pure (instrs, ctx)
 
 -- Primitive operation
 compileANormal ctx (TPrm op args) = do
   -- Compile arguments (push onto stack)
-  argInstrs <- concat <$> mapM (compileANormal ctx . TVar) args
+  (argInstrs, ctx1) <- compileArgs ctx args
   -- Special case: Debug operations are FFI calls that need yield check
   case op of
-    TRCE -> pure $ argInstrs ++ ffiCallWithYieldCheck "Debug_trace"
-    PRNT -> pure $ argInstrs ++ ffiCallWithYieldCheck "Debug_watch"
+    TRCE -> do
+      let (yieldId, ctx2) = allocYieldPoint ctx1
+          allLocals = ctxLocals ctx2
+      pure (argInstrs ++ ffiCallWithYieldCheckFull "Debug_trace" (ctxFuncTableIdx ctx2) yieldId allLocals, ctx2)
+    PRNT -> do
+      let (yieldId, ctx2) = allocYieldPoint ctx1
+          allLocals = ctxLocals ctx2
+      pure (argInstrs ++ ffiCallWithYieldCheckFull "Debug_watch" (ctxFuncTableIdx ctx2) yieldId allLocals, ctx2)
     _ -> do
       -- Regular primitive - emit single instruction
       opInstr <- compilePrimOp op (length args)
-      pure $ argInstrs ++ [opInstr]
+      pure (argInstrs ++ [opInstr], ctx1)
 
 -- Static function call (FComb) - handle builtins specially
 -- Also handles partial application when args.length < arity
 compileANormal ctx (TApp (FComb ref) args) = do
   -- Compile arguments
-  argInstrs <- concat <$> mapM (compileANormal ctx . TVar) args
+  (argInstrs, ctx1) <- compileArgs ctx args
   let numArgs = length args
   case ref of
     -- Builtin references: map to primitive operations or foreign functions
     Reference.Builtin name -> do
       -- Special case: Debug builtins are FFI calls that need yield check
       case name of
-        "Debug.trace" -> pure $ argInstrs ++ ffiCallWithYieldCheck "Debug_trace"
-        "Debug.watch" -> pure $ argInstrs ++ ffiCallWithYieldCheck "Debug_watch"
+        "Debug.trace" -> do
+          let (yieldId, ctx2) = allocYieldPoint ctx1
+              allLocals = ctxLocals ctx2
+          pure (argInstrs ++ ffiCallWithYieldCheckFull "Debug_trace" (ctxFuncTableIdx ctx2) yieldId allLocals, ctx2)
+        "Debug.watch" -> do
+          let (yieldId, ctx2) = allocYieldPoint ctx1
+              allLocals = ctxLocals ctx2
+          pure (argInstrs ++ ffiCallWithYieldCheckFull "Debug_watch" (ctxFuncTableIdx ctx2) yieldId allLocals, ctx2)
         _ ->
           -- Try to map builtin to primitive op
           case builtinToPrimOp name numArgs of
-            Just opInstrs -> pure $ argInstrs ++ opInstrs
+            Just opInstrs -> pure (argInstrs ++ opInstrs, ctx1)
             Nothing ->
               -- Check if it's a foreign function
               case builtinNameToForeignFunc name of
                 Just ff -> do
                   -- Foreign function call - emit import call with yield check
                   let funcName = foreignFuncToImportName ff
-                  pure $ argInstrs ++ ffiCallWithYieldCheck funcName
+                      (yieldId, ctx2) = allocYieldPoint ctx1
+                      allLocals = ctxLocals ctx2
+                  pure (argInstrs ++ ffiCallWithYieldCheckFull funcName (ctxFuncTableIdx ctx2) yieldId allLocals, ctx2)
                 Nothing ->
                   -- Unknown builtin
                   Left $ UnsupportedConstruct $ "Unknown builtin: " <> name
     -- Derived reference: look up in refNames for lifted combinators
     Reference.DerivedId _ -> do
-      case Map.lookup ref (ctxRefNames ctx) of
+      case Map.lookup ref (ctxRefNames ctx1) of
         Just funcName -> do
           -- Check if this is a partial application
-          case Map.lookup ref (ctxRefArities ctx) of
+          case Map.lookup ref (ctxRefArities ctx1) of
             Just arity | numArgs < arity ->
               -- Partial application: create a PAp and store args
               -- Use table index for call_indirect
-              let tableIdx = Map.lookup ref (ctxRefTableIndices ctx)
+              let tableIdx = Map.lookup ref (ctxRefTableIndices ctx1)
               in case tableIdx of
                    Just idx -> do
                      -- Allocate PAp, store captured args, then convert to i64
                      -- Use __pap_temp local (must be declared in the function)
                      let tempName = "__pap_temp"
-                     storeInstrs <- storePApArgs ctx tempName 0 args
-                     pure $
-                       -- Don't use argInstrs - we read from locals in storePApArgs
-                       [ I32Const (fromIntegral idx)
-                       , I32Const (fromIntegral arity)
-                       , I32Const (fromIntegral numArgs)
-                       , Call "__alloc_pap"
-                       , LocalSet tempName  -- Store PAp pointer
-                       ]
-                       ++ storeInstrs  -- Store captured args
-                       ++ [LocalGet tempName, I64ExtendI32U]  -- Get pointer and extend to i64
+                     storeInstrs <- storePApArgs ctx1 tempName 0 args
+                     pure
+                       ( -- Don't use argInstrs - we read from locals in storePApArgs
+                         [ I32Const (fromIntegral idx)
+                         , I32Const (fromIntegral arity)
+                         , I32Const (fromIntegral numArgs)
+                         , Call "__alloc_pap"
+                         , LocalSet tempName  -- Store PAp pointer
+                         ]
+                         ++ storeInstrs  -- Store captured args
+                         ++ [LocalGet tempName, I64ExtendI32U]  -- Get pointer and extend to i64
+                       , ctx1
+                       )
                    Nothing ->
                      Left $ UnsupportedConstruct $ "No table index for reference in partial application"
             _ ->
               -- Full application: direct call
-              pure $ argInstrs ++ [Call funcName]
+              pure (argInstrs ++ [Call funcName], ctx1)
         Nothing ->
           -- Not found in refNames - might be self-recursion
-          let funcName = if null (ctxCurrentFunc ctx) then "target" else ctxCurrentFunc ctx
-           in pure $ argInstrs ++ [Call funcName]
+          let funcName = if null (ctxCurrentFunc ctx1) then "target" else ctxCurrentFunc ctx1
+           in pure (argInstrs ++ [Call funcName], ctx1)
 
 -- Function variable call (FVar) - call local combinator or PAp
 compileANormal ctx (TApp (FVar v) args) = do
@@ -653,19 +672,19 @@ compileANormal ctx (TApp (FVar v) args) = do
   case Map.lookup v (ctxFuncNames ctx) of
     Just funcName -> do
       -- Known combinator - direct call
-      argInstrs <- concat <$> mapM (compileANormal ctx . TVar) args
-      pure $ argInstrs ++ [Call funcName]
+      (argInstrs, ctx1) <- compileArgs ctx args
+      pure (argInstrs ++ [Call funcName], ctx1)
     Nothing ->
       -- Not a known combinator - must be a local variable holding a PAp
       case lookupVar v ctx of
         Just (localIdx, _) -> do
           -- This is a local variable holding a PAp pointer
           -- We need to dynamically dispatch: load captured args + new args, then call_indirect
-          argInstrs <- concat <$> mapM (compileANormal ctx . TVar) args
+          (argInstrs, ctx1) <- compileArgs ctx args
           let numNewArgs = length args
               papLocal = "p" ++ show localIdx
           -- Generate code to invoke the PAp with new arguments
-          pure $ compileApplyPAp papLocal numNewArgs argInstrs
+          pure (compileApplyPAp papLocal numNewArgs argInstrs, ctx1)
         Nothing ->
           Left $ UnboundVariable (Var.name v)
 
@@ -674,43 +693,47 @@ compileANormal ctx (TApp (FVar v) args) = do
 -- Data1 (1 field): allocate heap object
 -- Data2 (2 fields): allocate heap object
 -- DataG (3+ fields): allocate heap object
-compileANormal _ctx (TApp (FCon _ref tag) []) = do
+compileANormal ctx (TApp (FCon _ref tag) []) = do
   -- Enum type: just return the constructor tag as i64
-  pure [I64Const (rawTag tag)]
+  pure ([I64Const (rawTag tag)], ctx)
 
 compileANormal ctx (TApp (FCon ref tag) [arg1]) = do
   -- Data1: one field
-  argInstrs <- compileANormal ctx (TVar arg1)
+  (argInstrs, ctx1) <- compileANormal ctx (TVar arg1)
   let typeRef = refToI32 ref
       ctorId = fromIntegral (rawTag tag) :: Word32
-      argTag = getVarTypeTag ctx arg1
-  pure $
-    [ I32Const typeRef,
-      I32Const ctorId,
-      I32Const argTag -- field0 TypeTag
-    ]
-      ++ argInstrs -- field0 value on stack
-      ++ [Call "__alloc_data1"]
-      ++ P.extendPtrToI64 -- Return as i64
+      argTag = getVarTypeTag ctx1 arg1
+  pure
+    ( [ I32Const typeRef,
+        I32Const ctorId,
+        I32Const argTag -- field0 TypeTag
+      ]
+        ++ argInstrs -- field0 value on stack
+        ++ [Call "__alloc_data1"]
+        ++ P.extendPtrToI64 -- Return as i64
+    , ctx1
+    )
 
 compileANormal ctx (TApp (FCon ref tag) [arg1, arg2]) = do
   -- Data2: two fields
-  arg1Instrs <- compileANormal ctx (TVar arg1)
-  arg2Instrs <- compileANormal ctx (TVar arg2)
+  (arg1Instrs, ctx1) <- compileANormal ctx (TVar arg1)
+  (arg2Instrs, ctx2) <- compileANormal ctx1 (TVar arg2)
   let typeRef = refToI32 ref
       ctorId = fromIntegral (rawTag tag) :: Word32
-      arg1Tag = getVarTypeTag ctx arg1
-      arg2Tag = getVarTypeTag ctx arg2
-  pure $
-    [ I32Const typeRef,
-      I32Const ctorId,
-      I32Const arg1Tag
-    ]
-      ++ arg1Instrs
-      ++ [I32Const arg2Tag]
-      ++ arg2Instrs
-      ++ [Call "__alloc_data2"]
-      ++ P.extendPtrToI64 -- Return as i64
+      arg1Tag = getVarTypeTag ctx2 arg1
+      arg2Tag = getVarTypeTag ctx2 arg2
+  pure
+    ( [ I32Const typeRef,
+        I32Const ctorId,
+        I32Const arg1Tag
+      ]
+        ++ arg1Instrs
+        ++ [I32Const arg2Tag]
+        ++ arg2Instrs
+        ++ [Call "__alloc_data2"]
+        ++ P.extendPtrToI64 -- Return as i64
+    , ctx2
+    )
 
 compileANormal ctx (TApp (FCon ref tag) args) = do
   -- DataG: 3+ fields - allocate then fill
@@ -727,11 +750,13 @@ compileANormal ctx (TApp (FCon ref tag) args) = do
         ]
   -- Then store each field
   storeInstrs <- storeDataGFields ctx args 0
-  pure $
-    allocInstrs
-      ++ storeInstrs
-      ++ [LocalGet "__datag_temp"]
-      ++ P.extendPtrToI64
+  pure
+    ( allocInstrs
+        ++ storeInstrs
+        ++ [LocalGet "__datag_temp"]
+        ++ P.extendPtrToI64
+    , ctx
+    )
 
 -- TReq: Ability request (TApp (FReq ref tag) args)
 -- Creates a request value and triggers the handler for the ability.
@@ -752,43 +777,43 @@ compileANormal ctx (TApp (FReq abilityRef tag) args) = do
       numArgs = length args
 
   -- Compile arguments for the request
-  argInstrs <- concat <$> mapM (compileANormal ctx . TVar) args
+  (argInstrs, ctx1) <- compileArgs ctx args
 
-  pure $
-    [ Comment $ "TReq: Ability request"
-    , Comment $ "  Ability ref: " ++ show typeRef ++ ", ctor: " ++ show ctorId
+  pure
+    ( [ Comment $ "TReq: Ability request"
+      , Comment $ "  Ability ref: " ++ show typeRef ++ ", ctor: " ++ show ctorId
 
-    -- 1. Create request object (Data with ability ref as type, tag as ctor)
-    --    For 0 args, create enum-like object
-    --    For 1+ args, create Data1/2/G
-    ]
-      ++ (if numArgs == 0
-            then
-              [ I32Const typeRef
-              , I32Const ctorId
-              , Call "__alloc_enum"
-              , LocalSet "__req_ptr"
-              ]
-            else if numArgs == 1
+      -- 1. Create request object (Data with ability ref as type, tag as ctor)
+      --    For 0 args, create enum-like object
+      --    For 1+ args, create Data1/2/G
+      ]
+        ++ (if numArgs == 0
               then
-                argInstrs ++
-                [ LocalSet "__req_arg0"  -- Save arg temporarily
-                , I32Const typeRef
-                , I32Const ctorId
-                , I32Const (fromIntegral $ ABI.typeTagToWord8 ABI.typeNat)  -- TypeTag for first arg
-                , LocalGet "__req_arg0"
-                , Call "__alloc_data1"
-                , LocalSet "__req_ptr"
-                ]
-              else
-                -- For 2+ args, use datag (simplified)
                 [ I32Const typeRef
                 , I32Const ctorId
-                , I32Const (fromIntegral numArgs)
-                , Call "__alloc_datag"
+                , Call "__alloc_enum"
                 , LocalSet "__req_ptr"
-                -- TODO: store args into datag
-                ])
+                ]
+              else if numArgs == 1
+                then
+                  argInstrs ++
+                  [ LocalSet "__req_arg0"  -- Save arg temporarily
+                  , I32Const typeRef
+                  , I32Const ctorId
+                  , I32Const (fromIntegral $ ABI.typeTagToWord8 ABI.typeNat)  -- TypeTag for first arg
+                  , LocalGet "__req_arg0"
+                  , Call "__alloc_data1"
+                  , LocalSet "__req_ptr"
+                  ]
+                else
+                  -- For 2+ args, use datag (simplified)
+                  [ I32Const typeRef
+                  , I32Const ctorId
+                  , I32Const (fromIntegral numArgs)
+                  , Call "__alloc_datag"
+                  , LocalSet "__req_ptr"
+                  -- TODO: store args into datag
+                  ])
       ++
       [ Comment "  2. Look up handler in denv"
       , GlobalGet "denv_ptr"
@@ -888,15 +913,17 @@ compileANormal ctx (TApp (FReq abilityRef tag) args) = do
       , LocalGet "__handler_func_idx"
       , CallIndirect "arity2"
       ]
+    , ctx1
+    )
 
 -- Pattern match on integral values (MatchIntegral)
 compileANormal ctx (TMatch v (MatchIntegral cases defaultCase)) = do
-  compileIntegralMatch ctx v (EC.mapToList cases) defaultCase
+  compileIntegralMatchWithCtx ctx v (EC.mapToList cases) defaultCase
 
 -- Pattern match on boxed numeric values (MatchNumeric)
 -- Same as MatchIntegral but for boxed data (produced by parser)
 compileANormal ctx (TMatch v (MatchNumeric _ref cases defaultCase)) = do
-  compileIntegralMatch ctx v (EC.mapToList cases) defaultCase
+  compileIntegralMatchWithCtx ctx v (EC.mapToList cases) defaultCase
 
 -- Pattern match on data types (MatchData) - sum type dispatch
 -- For enums (no fields), dispatch on the tag value
@@ -909,9 +936,9 @@ compileANormal ctx (TMatch v (MatchData _ref cases defaultCase)) = do
 
   if null dataCases
     then -- All enum cases: use simple if-else chain
-      compileIntegralMatch ctx v enumCases defaultCase
+      compileIntegralMatchWithCtx ctx v enumCases defaultCase
     else -- Mixed cases with field bindings
-      compileDataMatch ctx v allCases defaultCase
+      compileDataMatchWithCtx ctx v allCases defaultCase
 
 -- Pattern match on ability requests (MatchRequest)
 -- Used in handler bodies to match on the operation being performed.
@@ -928,36 +955,37 @@ compileANormal ctx (TMatch v (MatchRequest abilityBranches pureCase)) = do
       let scrutLocal = "p" ++ show localIdx
 
       -- Compile the pure case (when effect is "pure" / already handled)
-      pureCaseInstrs <- compileANormal ctx pureCase
+      (pureCaseInstrs, ctx1) <- compileANormal ctx pureCase
 
       -- For MVP: generate if-else chain for ability branches
-      -- Full implementation would extract packed tag from the request object
-      branchInstrs <- compileRequestBranches ctx scrutLocal abilityBranches
+      (branchInstrs, ctx2) <- compileRequestBranchesWithCtx ctx1 scrutLocal abilityBranches
 
-      pure $
-        [ Comment "MatchRequest: Match on ability request"
-        , Comment $ "  Scrutinee: " ++ scrutLocal
+      pure
+        ( [ Comment "MatchRequest: Match on ability request"
+          , Comment $ "  Scrutinee: " ++ scrutLocal
 
-        -- In native runtime, the scrutinee is a data value with a packed tag.
-        -- We load the tag and check if it's pure (tag == 0 for pure effect).
-        -- For MVP, we assume the scrutinee is a boxed value and load its tag.
+          -- In native runtime, the scrutinee is a data value with a packed tag.
+          -- We load the tag and check if it's pure (tag == 0 for pure effect).
+          -- For MVP, we assume the scrutinee is a boxed value and load its tag.
 
-        -- Load the scrutinee pointer
-        , LocalGet scrutLocal
-        , I32WrapI64  -- Convert i64 to pointer
+          -- Load the scrutinee pointer
+          , LocalGet scrutLocal
+          , I32WrapI64  -- Convert i64 to pointer
 
-        -- Load the ctor_id from the data object (at offset 12 for enum/data objects)
-        -- This gives us the packed effect tag
-        , I32Load (fromIntegral ABI.enumCtorIdOffset)
-        , LocalSet "__frame_tag"  -- Reuse as request_tag
+          -- Load the ctor_id from the data object (at offset 12 for enum/data objects)
+          -- This gives us the packed effect tag
+          , I32Load (fromIntegral ABI.enumCtorIdOffset)
+          , LocalSet "__frame_tag"  -- Reuse as request_tag
 
-        -- Check if pure (tag == 0, representing pureEffectTag)
-        , LocalGet "__frame_tag"
-        , I32Eqz
-        , If I64
-            pureCaseInstrs
-            branchInstrs
-        ]
+          -- Check if pure (tag == 0, representing pureEffectTag)
+          , LocalGet "__frame_tag"
+          , I32Eqz
+          , If I64
+              pureCaseInstrs
+              branchInstrs
+          ]
+        , ctx2
+        )
 
 -- TName: bind a closure to a variable
 -- TName v f as body: create PAp for function f with captured args as, bind to v, execute body
@@ -986,7 +1014,7 @@ compileANormal ctx (TName v f args bo) = do
         }
 
   -- Compile the body with the new binding
-  bodyInstrs <- compileANormal newCtx bo
+  (bodyInstrs, finalCtx) <- compileANormal newCtx bo
 
   -- Generate PAp allocation
   let allocInstrs =
@@ -1001,7 +1029,7 @@ compileANormal ctx (TName v f args bo) = do
   -- Store captured arguments into the PAp (reads from existing locals)
   storeInstrs <- storePApArgs ctx localName 0 args
 
-  pure $ allocInstrs ++ storeInstrs ++ bodyInstrs
+  pure (allocInstrs ++ storeInstrs ++ bodyInstrs, finalCtx)
 
 --------------------------------------------------------------------------------
 -- Ability Handler Constructs
@@ -1037,12 +1065,12 @@ compileANormal ctx (THnd refs handlerVar _affineHandler body) = do
             [] -> 0
 
       -- Compile the body
-      bodyInstrs <- compileANormal ctx body
+      (bodyInstrs, ctx1) <- compileANormal ctx body
 
       -- Generate instructions to insert handler into denv for each ability
-      let insertHandlerInstrs ref =
+      let insertHandlerInstrs refVal =
             [ GlobalGet "denv_ptr"  -- Current denv
-            , I32Const ref           -- Ability key
+            , I32Const refVal        -- Ability key
             , LocalGet handlerLocal
             , I32WrapI64             -- Handler pointer
             , Call "__denv_insert"
@@ -1053,32 +1081,34 @@ compileANormal ctx (THnd refs handlerVar _affineHandler body) = do
       let allInsertInstrs = concatMap insertHandlerInstrs abilityRefs
 
       -- Generate: install handler, push Mark frame, run body, pop Mark frame, restore denv
-      pure $
-        [ Comment "THnd: Install ability handler"
-        , Comment $ "  Ability refs: " ++ show abilityRefs
+      pure
+        ( [ Comment "THnd: Install ability handler"
+          , Comment $ "  Ability refs: " ++ show abilityRefs
 
-        -- 1. Push Mark frame first (saves current k_ptr and denv_ptr)
-        --    Uses primary ref for TShift matching
-        , I32Const 0  -- pending_args (0 at installation time)
-        , I32Const primaryRef
-        , LocalGet handlerLocal
-        , I32WrapI64  -- Handler is i64, convert to i32 pointer
-        , Call "__alloc_mark"
-        , GlobalSet "k_ptr"  -- Push Mark frame to K stack
-        ]
-          -- 2. Insert handler into denv for each ability ref
-          ++ allInsertInstrs
-          ++ bodyInstrs
-          ++ [ Comment "THnd: Pop Mark frame (handler completed normally)"
-             -- Restore denv from Mark frame's saved denv
-             , GlobalGet "k_ptr"
-             , I32Load (fromIntegral ABI.kMarkLocalCountOffset)  -- Saved denv is at this offset
-             , GlobalSet "denv_ptr"
-             -- Pop Mark frame
-             , GlobalGet "k_ptr"
-             , I32Load (fromIntegral ABI.kMarkNextKOffset)
-             , GlobalSet "k_ptr"
-             ]
+          -- 1. Push Mark frame first (saves current k_ptr and denv_ptr)
+          --    Uses primary ref for TShift matching
+          , I32Const 0  -- pending_args (0 at installation time)
+          , I32Const primaryRef
+          , LocalGet handlerLocal
+          , I32WrapI64  -- Handler is i64, convert to i32 pointer
+          , Call "__alloc_mark"
+          , GlobalSet "k_ptr"  -- Push Mark frame to K stack
+          ]
+            -- 2. Insert handler into denv for each ability ref
+            ++ allInsertInstrs
+            ++ bodyInstrs
+            ++ [ Comment "THnd: Pop Mark frame (handler completed normally)"
+               -- Restore denv from Mark frame's saved denv
+               , GlobalGet "k_ptr"
+               , I32Load (fromIntegral ABI.kMarkLocalCountOffset)  -- Saved denv is at this offset
+               , GlobalSet "denv_ptr"
+               -- Pop Mark frame
+               , GlobalGet "k_ptr"
+               , I32Load (fromIntegral ABI.kMarkNextKOffset)
+               , GlobalSet "k_ptr"
+               ]
+        , ctx1
+        )
 
 -- TShift: Capture continuation up to a prompt
 -- TShift ref contVar body
@@ -1105,101 +1135,103 @@ compileANormal ctx (TShift ref contVar body) = do
   let abilityRef = refToI32 ref
 
   -- Compile the body with the continuation bound
-  bodyInstrs <- compileANormal newCtx body
+  (bodyInstrs, ctx1) <- compileANormal newCtx body
 
   -- Generate continuation capture code
   -- We need helper locals for the walk:
   -- __k_walk: current frame being examined
   -- __k_start: where we started (to store in Captured)
   -- __mark_ptr: the Mark frame when found
-  pure $
-    [ Comment $ "TShift: Capture continuation for ability " ++ show abilityRef
-    , Comment "  Walk K to find matching Mark frame"
+  pure
+    ( [ Comment $ "TShift: Capture continuation for ability " ++ show abilityRef
+      , Comment "  Walk K to find matching Mark frame"
 
-    -- Save starting k_ptr (this will be stored in Captured)
-    , GlobalGet "k_ptr"
-    , LocalSet "__k_start"
+      -- Save starting k_ptr (this will be stored in Captured)
+      , GlobalGet "k_ptr"
+      , LocalSet "__k_start"
 
-    -- Walk K to find the Mark frame for this ability
-    , GlobalGet "k_ptr"
-    , LocalSet "__k_walk"
+      -- Walk K to find the Mark frame for this ability
+      , GlobalGet "k_ptr"
+      , LocalSet "__k_walk"
 
-    -- Loop to find the matching Mark frame
-    , Block "shift_found"
-        [ Loop "shift_walk"
-            [ -- Check if we've hit KE (k_walk == 0)
-              LocalGet "__k_walk"
-            , I32Eqz
-            , IfVoid
-                [ Comment "Error: fell off K stack without finding Mark"
-                , Unreachable
-                ]
-                []
+      -- Loop to find the matching Mark frame
+      , Block "shift_found"
+          [ Loop "shift_walk"
+              [ -- Check if we've hit KE (k_walk == 0)
+                LocalGet "__k_walk"
+              , I32Eqz
+              , IfVoid
+                  [ Comment "Error: fell off K stack without finding Mark"
+                  , Unreachable
+                  ]
+                  []
 
-            -- Load frame tag
-            , LocalGet "__k_walk"
-            , I32Load8U (fromIntegral ABI.kPushFrameTagOffset)
-            , LocalSet "__frame_tag"
+              -- Load frame tag
+              , LocalGet "__k_walk"
+              , I32Load8U (fromIntegral ABI.kPushFrameTagOffset)
+              , LocalSet "__frame_tag"
 
-            -- Check if it's a Mark frame (tag == FRAME_MARK)
-            , LocalGet "__frame_tag"
-            , I32Const (fromIntegral $ ABI.frameTagToWord8 ABI.frameMark)
-            , I32Eq
-            , IfVoid
-                [ -- It's a Mark frame - check if ability matches
-                  LocalGet "__k_walk"
-                , I32Load (fromIntegral ABI.kMarkAbilityRefOffset)
-                , I32Const abilityRef
-                , I32Eq
-                , IfVoid
-                    [ -- Found matching Mark! Save it and exit loop
-                      LocalGet "__k_walk"
-                    , LocalSet "__mark_ptr"
-                    , Br "shift_found"
-                    ]
-                    [ -- Not our ability, continue walking
-                      LocalGet "__k_walk"
-                    , I32Load (fromIntegral ABI.kMarkNextKOffset)
-                    , LocalSet "__k_walk"
-                    , Br "shift_walk"
-                    ]
-                ]
-                [ -- Not a Mark frame (must be Push), continue walking
-                  LocalGet "__k_walk"
-                , I32Load (fromIntegral ABI.kPushNextKOffset)
-                , LocalSet "__k_walk"
-                , Br "shift_walk"
-                ]
-            ]
-        ]
+              -- Check if it's a Mark frame (tag == FRAME_MARK)
+              , LocalGet "__frame_tag"
+              , I32Const (fromIntegral $ ABI.frameTagToWord8 ABI.frameMark)
+              , I32Eq
+              , IfVoid
+                  [ -- It's a Mark frame - check if ability matches
+                    LocalGet "__k_walk"
+                  , I32Load (fromIntegral ABI.kMarkAbilityRefOffset)
+                  , I32Const abilityRef
+                  , I32Eq
+                  , IfVoid
+                      [ -- Found matching Mark! Save it and exit loop
+                        LocalGet "__k_walk"
+                      , LocalSet "__mark_ptr"
+                      , Br "shift_found"
+                      ]
+                      [ -- Not our ability, continue walking
+                        LocalGet "__k_walk"
+                      , I32Load (fromIntegral ABI.kMarkNextKOffset)
+                      , LocalSet "__k_walk"
+                      , Br "shift_walk"
+                      ]
+                  ]
+                  [ -- Not a Mark frame (must be Push), continue walking
+                    LocalGet "__k_walk"
+                  , I32Load (fromIntegral ABI.kPushNextKOffset)
+                  , LocalSet "__k_walk"
+                  , Br "shift_walk"
+                  ]
+              ]
+          ]
 
-    , Comment "  Found Mark frame, create Captured object"
-    -- Allocate Captured: stores k_ptr, pending_args, slot_count
-    -- Count of locals to save: all locals bound before this shift point
-    , LocalGet "__k_start"   -- The K chain to capture
-    , I32Const 0             -- pending_args
-    , I32Const (fromIntegral $ ctxNextLocal ctx)  -- Number of locals to save
-    , Call "__alloc_captured"
-    , LocalSet "__captured_ptr"  -- Store, don't tee (avoid stack value)
-    ]
-      -- Save all locals to Captured slots
-      ++ concatMap (saveLocalToCapture $ ctxNextLocal ctx) [0 .. ctxNextLocal ctx - 1]
-      ++
-    [ LocalGet "__captured_ptr"
-    , I64ExtendI32U          -- Convert to i64 for boxed representation
-    , LocalSet contLocal     -- Bind continuation to variable
+      , Comment "  Found Mark frame, create Captured object"
+      -- Allocate Captured: stores k_ptr, pending_args, slot_count
+      -- Count of locals to save: all locals bound before this shift point
+      , LocalGet "__k_start"   -- The K chain to capture
+      , I32Const 0             -- pending_args
+      , I32Const (fromIntegral $ ctxNextLocal ctx)  -- Number of locals to save
+      , Call "__alloc_captured"
+      , LocalSet "__captured_ptr"  -- Store, don't tee (avoid stack value)
+      ]
+        -- Save all locals to Captured slots
+        ++ concatMap (saveLocalToCapture $ ctxNextLocal ctx) [0 .. ctxNextLocal ctx - 1]
+        ++
+      [ LocalGet "__captured_ptr"
+      , I64ExtendI32U          -- Convert to i64 for boxed representation
+      , LocalSet contLocal     -- Bind continuation to variable
 
-    , Comment "  Restore denv from Mark frame"
-    , LocalGet "__mark_ptr"
-    , I32Load (fromIntegral ABI.kMarkLocalCountOffset)  -- Saved denv
-    , GlobalSet "denv_ptr"
+      , Comment "  Restore denv from Mark frame"
+      , LocalGet "__mark_ptr"
+      , I32Load (fromIntegral ABI.kMarkLocalCountOffset)  -- Saved denv
+      , GlobalSet "denv_ptr"
 
-    , Comment "  Pop K stack up to and including Mark frame"
-    , LocalGet "__mark_ptr"
-    , I32Load (fromIntegral ABI.kMarkNextKOffset)
-    , GlobalSet "k_ptr"
-    ]
-      ++ bodyInstrs
+      , Comment "  Pop K stack up to and including Mark frame"
+      , LocalGet "__mark_ptr"
+      , I32Load (fromIntegral ABI.kMarkNextKOffset)
+      , GlobalSet "k_ptr"
+      ]
+        ++ bodyInstrs
+    , ctx1
+    )
 
 -- TKon: Resume a captured continuation (TApp FCont args)
 -- contVar: variable holding the captured continuation
@@ -1226,91 +1258,93 @@ compileANormal ctx (TKon contVar args) = do
       -- Compile arguments to pass to continuation (these become the shift result)
       -- In the native runtime, these are passed to closeArgs then dumpSeg.
       -- For MVP, we just return the first argument.
-      argInstrs <- concat <$> mapM (compileANormal ctx . TVar) args
+      (argInstrs, ctx1) <- compileArgs ctx args
 
-      pure $
-        [ Comment "TKon: Resume captured continuation"
-        , Comment $ "  Continuation var: " ++ contLocal
+      pure
+        ( [ Comment "TKon: Resume captured continuation"
+          , Comment $ "  Continuation var: " ++ contLocal
 
-        -- Get the Captured object pointer
-        , LocalGet contLocal
-        , I32WrapI64  -- Convert i64 to i32 pointer
-        , LocalSet "__cont_ptr"
+          -- Get the Captured object pointer
+          , LocalGet contLocal
+          , I32WrapI64  -- Convert i64 to i32 pointer
+          , LocalSet "__cont_ptr"
 
-        -- The captured K chain needs to be spliced onto current K.
-        -- The chain was captured from __k_start to __mark_ptr (exclusive).
-        -- We need to find the tail of the captured chain (frame whose next == mark_next)
-        -- and patch it to point to current k_ptr.
-        --
-        -- For MVP simplification: we assume the captured chain is shallow
-        -- and just restore it directly. This works for simple handlers
-        -- that don't nest calls within the handled scope.
+          -- The captured K chain needs to be spliced onto current K.
+          -- The chain was captured from __k_start to __mark_ptr (exclusive).
+          -- We need to find the tail of the captured chain (frame whose next == mark_next)
+          -- and patch it to point to current k_ptr.
+          --
+          -- For MVP simplification: we assume the captured chain is shallow
+          -- and just restore it directly. This works for simple handlers
+          -- that don't nest calls within the handled scope.
 
-        , Comment "  Load captured K chain start"
-        , LocalGet "__cont_ptr"
-        , I32Load (fromIntegral ABI.capturedKPtrOffset)
-        , LocalSet "__k_walk"
+          , Comment "  Load captured K chain start"
+          , LocalGet "__cont_ptr"
+          , I32Load (fromIntegral ABI.capturedKPtrOffset)
+          , LocalSet "__k_walk"
 
-        -- Walk to find the end of the captured chain (where next_k == 0 or is the old k_ptr)
-        -- For MVP: just prepend the whole captured chain
-        -- More complex: walk to end and patch
+          -- Walk to find the end of the captured chain (where next_k == 0 or is the old k_ptr)
+          -- For MVP: just prepend the whole captured chain
+          -- More complex: walk to end and patch
 
-        , Comment "  Find end of captured K chain and patch to current k_ptr"
-        , Block "repush_done"
-            [ Loop "repush_walk"
-                [ -- If __k_walk is 0 (KE), we're done
-                  LocalGet "__k_walk"
-                , I32Eqz
-                , BrIf "repush_done"
+          , Comment "  Find end of captured K chain and patch to current k_ptr"
+          , Block "repush_done"
+              [ Loop "repush_walk"
+                  [ -- If __k_walk is 0 (KE), we're done
+                    LocalGet "__k_walk"
+                  , I32Eqz
+                  , BrIf "repush_done"
 
-                -- Load frame tag
-                , LocalGet "__k_walk"
-                , I32Load8U 0
-                , LocalSet "__frame_tag"
+                  -- Load frame tag
+                  , LocalGet "__k_walk"
+                  , I32Load8U 0
+                  , LocalSet "__frame_tag"
 
-                -- Get next_k offset based on frame type
-                -- (Both Push and Mark have next_k at same offset: 4)
-                , LocalGet "__k_walk"
-                , I32Load (fromIntegral ABI.kPushNextKOffset)  -- next_k is at offset 4 for both
-                , LocalTee "__k_start"  -- Reuse __k_start as next_ptr temp
+                  -- Get next_k offset based on frame type
+                  -- (Both Push and Mark have next_k at same offset: 4)
+                  , LocalGet "__k_walk"
+                  , I32Load (fromIntegral ABI.kPushNextKOffset)  -- next_k is at offset 4 for both
+                  , LocalTee "__k_start"  -- Reuse __k_start as next_ptr temp
 
-                -- If next_k is 0, we've found the end - patch it
-                , I32Eqz
-                , IfVoid
-                    [ -- Patch this frame's next_k to point to current k_ptr
-                      LocalGet "__k_walk"
-                    , GlobalGet "k_ptr"
-                    , I32Store (fromIntegral ABI.kPushNextKOffset)
-                    , Br "repush_done"
-                    ]
-                    [ -- Not at end, continue walking
-                      LocalGet "__k_start"  -- next_ptr is in __k_start
-                    , LocalSet "__k_walk"
-                    , Br "repush_walk"
-                    ]
-                ]
-            ]
+                  -- If next_k is 0, we've found the end - patch it
+                  , I32Eqz
+                  , IfVoid
+                      [ -- Patch this frame's next_k to point to current k_ptr
+                        LocalGet "__k_walk"
+                      , GlobalGet "k_ptr"
+                      , I32Store (fromIntegral ABI.kPushNextKOffset)
+                      , Br "repush_done"
+                      ]
+                      [ -- Not at end, continue walking
+                        LocalGet "__k_start"  -- next_ptr is in __k_start
+                      , LocalSet "__k_walk"
+                      , Br "repush_walk"
+                      ]
+                  ]
+              ]
 
-        , Comment "  Set k_ptr to start of captured chain"
-        , LocalGet "__cont_ptr"
-        , I32Load (fromIntegral ABI.capturedKPtrOffset)
-        , GlobalSet "k_ptr"
+          , Comment "  Set k_ptr to start of captured chain"
+          , LocalGet "__cont_ptr"
+          , I32Load (fromIntegral ABI.capturedKPtrOffset)
+          , GlobalSet "k_ptr"
 
-        , Comment "  Restore locals from Captured object"
-        -- Read slot_count from Captured
-        , LocalGet "__cont_ptr"
-        , I32Load (fromIntegral ABI.capturedCountOffset)
-        , LocalSet "__frame_tag"  -- Reuse as slot_count temp
-        ]
-          -- Generate restore code for each possible local
-          -- We check if slot_count > localIdx before restoring each
-          ++ concatMap (restoreLocalConditionally) [0 .. ctxNextLocal ctx - 1]
-          ++ argInstrs
-          ++
-          -- Return the argument (which becomes the result of the shift expression)
-          [ Comment "  Return argument as shift result"
-          , if null argInstrs then I64Const 0 else Nop
+          , Comment "  Restore locals from Captured object"
+          -- Read slot_count from Captured
+          , LocalGet "__cont_ptr"
+          , I32Load (fromIntegral ABI.capturedCountOffset)
+          , LocalSet "__frame_tag"  -- Reuse as slot_count temp
           ]
+            -- Generate restore code for each possible local
+            -- We check if slot_count > localIdx before restoring each
+            ++ concatMap (restoreLocalConditionally) [0 .. ctxNextLocal ctx - 1]
+            ++ argInstrs
+            ++
+            -- Return the argument (which becomes the result of the shift expression)
+            [ Comment "  Return argument as shift result"
+            , if null argInstrs then I64Const 0 else Nop
+            ]
+        , ctx1
+        )
   where
     -- | Generate conditional restore for a single local
     -- Only restores if slot_count > localIdx (i.e., localIdx < slot_count)
@@ -1334,38 +1368,88 @@ compileANormal ctx (TKon contVar args) = do
 -- and later calls __resume to continue the computation.
 compileANormal ctx (TFOp foreignFunc args) = do
   -- Compile arguments (push onto stack as i64)
-  argInstrs <- concat <$> mapM (compileANormal ctx . TVar) args
+  (argInstrs, ctx1) <- compileArgs ctx args
   -- Call the imported function using its sanitized name
   let funcName = foreignFuncToImportName foreignFunc
-  pure $ argInstrs ++ ffiCallWithYieldCheck funcName
+      (yieldId, ctx2) = allocYieldPoint ctx1
+      allLocals = ctxLocals ctx2
+  pure (argInstrs ++ ffiCallWithYieldCheckFull funcName (ctxFuncTableIdx ctx2) yieldId allLocals, ctx2)
 
 -- Fallback for unsupported constructs
-compileANormal _ctx _term = do
-  Left $ UnsupportedConstruct "Unsupported ANormal construct"
+compileANormal ctx _term = do
+  pure ([Comment "Unsupported ANormal construct", Unreachable], ctx)
 
--- | Generate instructions for an FFI call with yield checking.
+-- | Compile a list of variable arguments, threading context through
+compileArgs :: (Var v) => CompileCtx v -> [v] -> CompileResult ([WatInstr], CompileCtx v)
+compileArgs ctx [] = pure ([], ctx)
+compileArgs ctx (v:vs) = do
+  (instrs1, ctx1) <- compileANormal ctx (TVar v)
+  (instrs2, ctx2) <- compileArgs ctx1 vs
+  pure (instrs1 ++ instrs2, ctx2)
+
+--------------------------------------------------------------------------------
+-- FFI Call Helpers
+--------------------------------------------------------------------------------
+
+-- | Generate instructions for an FFI call with full yield handling.
 --
--- After calling the FFI function:
--- 1. Check if result == YIELD_SENTINEL
--- 2. If yes: return YIELD_SENTINEL to propagate yield up the call stack
--- 3. If no: leave result on stack for caller
---
--- This pattern enables async FFI where JavaScript can return YIELD_SENTINEL
--- to pause execution, then later call __resume to continue.
-ffiCallWithYieldCheck :: String -> [WatInstr]
-ffiCallWithYieldCheck funcName =
+-- This version saves all locals when yielding, enabling proper resumption.
+-- Parameters:
+-- * funcName - the FFI function to call
+-- * funcTableIdx - this function's index in the function table
+-- * yieldPointId - unique ID for this yield point (for br_table resume)
+-- * localNames - list of (name, type) for all locals to save
+ffiCallWithYieldCheckFull ::
+  String ->          -- FFI function name
+  Int ->             -- Function table index
+  Int ->             -- Yield point ID
+  [(String, WatValType)] -> -- All locals to save
+  [WatInstr]
+ffiCallWithYieldCheckFull funcName funcTableIdx yieldPointId locals =
+  let localsCount = length locals
+      -- Generate instructions to save each local to the locals array
+      -- Array layout: locals[i] at offset i*8
+      saveLocals = concatMap saveLocal (zip [0..] locals)
+      saveLocal (idx, (name, _)) =
+        [ LocalGet "__async_locals_ptr",
+          LocalGet name,
+          I64Store (fromIntegral (idx * 8 :: Int))
+        ]
+  in
   [ Call funcName,
     -- Save result to local, keep on stack for comparison
     LocalTee "__ffi_result",
     -- Compare with YIELD_SENTINEL
     I64Const ABI.yieldSentinel,
     I64Eq,
-    -- If equal, propagate yield
+    -- If equal, save state and return YIELD_SENTINEL
     IfVoid
-      [ Comment "FFI returned YIELD_SENTINEL - propagate yield",
-        I64Const ABI.yieldSentinel,
-        Return
-      ]
+      ( [ Comment $ "FFI yielded - saving " ++ show localsCount ++ " locals",
+          -- Allocate locals array
+          I32Const (fromIntegral localsCount),
+          Call "__alloc_locals_array",
+          LocalSet "__async_locals_ptr"
+        ]
+        ++ saveLocals
+        ++ [ -- Generate unique continuation ID
+             GlobalGet "async_cont_id",
+             I64Const 1,
+             I64Add,
+             GlobalSet "async_cont_id",
+             -- Create AsyncCont object
+             GlobalGet "async_cont_id",  -- cont_id
+             GlobalGet "k_ptr",          -- k_ptr
+             LocalGet "__async_locals_ptr",  -- locals_ptr
+             I32Const (fromIntegral localsCount),  -- locals_count
+             I32Const (fromIntegral funcTableIdx), -- func_idx
+             I32Const (fromIntegral yieldPointId), -- resume_label
+             Call "__alloc_async_cont",
+             GlobalSet "async_cont_ptr",
+             -- Return YIELD_SENTINEL
+             I64Const ABI.yieldSentinel,
+             Return
+           ]
+      )
       [],
     -- Normal path: restore result to stack
     LocalGet "__ffi_result"
@@ -1480,6 +1564,14 @@ storeDataGFields ctx (field : rest) idx = do
 adaptMatchError :: Match.CompileError -> CompileError
 adaptMatchError (Match.UnsupportedConstruct msg) = UnsupportedConstruct msg
 
+-- | Helper to adapt the new compileANormal signature for Match functions
+-- Match functions expect CompileResult [WatInstr], but compileANormal returns
+-- CompileResult ([WatInstr], CompileCtx v). We extract just the instructions.
+compileANormalForMatch :: (Var v) => CompileCtx v -> ANormal Reference v -> Either Match.CompileError [WatInstr]
+compileANormalForMatch ctx term = case compileANormal ctx term of
+  Left err -> Left $ Match.UnsupportedConstruct (Text.pack (show err))
+  Right (instrs, _) -> Right instrs
+
 -- | Compile MatchIntegral/MatchNumeric with full multi-case support
 compileIntegralMatch ::
   (Var v) =>
@@ -1489,13 +1581,35 @@ compileIntegralMatch ::
   Maybe (ANormal Reference v) ->
   CompileResult [WatInstr]
 compileIntegralMatch ctx scrutVar cases mDefault =
-  case Match.compileIntegralMatch compileANormal' ctx scrutVar cases mDefault of
+  case Match.compileIntegralMatch compileANormalForMatch ctx scrutVar cases mDefault of
     Left err -> Left $ adaptMatchError err
     Right instrs -> Right instrs
+
+-- | Compile MatchIntegral/MatchNumeric with context threading
+compileIntegralMatchWithCtx ::
+  (Var v) =>
+  CompileCtx v ->
+  v ->
+  [(Word64, ANormal Reference v)] ->
+  Maybe (ANormal Reference v) ->
+  CompileResult ([WatInstr], CompileCtx v)
+compileIntegralMatchWithCtx ctx scrutVar cases mDefault = do
+  instrs <- compileIntegralMatch ctx scrutVar cases mDefault
+  -- Thread context through all branches to collect yield points
+  let ctx' = foldr (\(_, body) c -> collectLocals c body) ctx cases
+      ctx'' = case mDefault of
+                Just defBody -> collectLocals ctx' defBody
+                Nothing -> ctx'
+  -- Take the maximum yield point from all branches
+  let allContexts = map (\(_, body) -> collectYieldPoints ctx body) cases
+      maxYieldId = maximum (0 : map ctxNextYieldPoint allContexts)
+      finalCtx = ctx'' { ctxNextYieldPoint = maxYieldId }
+  pure (instrs, finalCtx)
   where
-    compileANormal' c t = case compileANormal c t of
-      Left err -> Left $ Match.UnsupportedConstruct (Text.pack (show err))
-      Right instrs -> Right instrs
+    collectYieldPoints :: (Var v) => CompileCtx v -> ANormal Reference v -> CompileCtx v
+    collectYieldPoints c body = case compileANormal c body of
+      Right (_, c') -> c'
+      Left _ -> c
 
 -- | Compile MatchData with potential field bindings
 compileDataMatch ::
@@ -1506,13 +1620,34 @@ compileDataMatch ::
   Maybe (ANormal Reference v) ->
   CompileResult [WatInstr]
 compileDataMatch ctx scrutVar cases mDefault =
-  case Match.compileDataMatch compileANormal' ctx scrutVar cases mDefault of
+  case Match.compileDataMatch compileANormalForMatch ctx scrutVar cases mDefault of
     Left err -> Left $ adaptMatchError err
     Right instrs -> Right instrs
+
+-- | Compile MatchData with context threading
+compileDataMatchWithCtx ::
+  (Var v) =>
+  CompileCtx v ->
+  v ->
+  [(CTag, ([Mem], ANormal Reference v))] ->
+  Maybe (ANormal Reference v) ->
+  CompileResult ([WatInstr], CompileCtx v)
+compileDataMatchWithCtx ctx scrutVar cases mDefault = do
+  instrs <- compileDataMatch ctx scrutVar cases mDefault
+  -- Thread context through all branches to collect yield points
+  let ctx' = foldr (\(_, (_, body)) c -> collectLocals c body) ctx cases
+      ctx'' = case mDefault of
+                Just defBody -> collectLocals ctx' defBody
+                Nothing -> ctx'
+  let allContexts = map (\(_, (_, body)) -> collectYieldPoints ctx body) cases
+      maxYieldId = maximum (0 : map ctxNextYieldPoint allContexts)
+      finalCtx = ctx'' { ctxNextYieldPoint = maxYieldId }
+  pure (instrs, finalCtx)
   where
-    compileANormal' c t = case compileANormal c t of
-      Left err -> Left $ Match.UnsupportedConstruct (Text.pack (show err))
-      Right instrs -> Right instrs
+    collectYieldPoints :: (Var v) => CompileCtx v -> ANormal Reference v -> CompileCtx v
+    collectYieldPoints c body = case compileANormal c body of
+      Right (_, c') -> c'
+      Left _ -> c
 
 -- | Compile ability request branches for MatchRequest
 compileRequestBranches ::
@@ -1522,13 +1657,24 @@ compileRequestBranches ::
   [(Reference, EC.EnumMap CTag ([Mem], ANormal Reference v))] ->
   CompileResult [WatInstr]
 compileRequestBranches ctx scrutLocal branches =
-  case Match.compileRequestBranches compileANormal' ctx scrutLocal branches of
+  case Match.compileRequestBranches compileANormalForMatch ctx scrutLocal branches of
     Left err -> Left $ adaptMatchError err
     Right instrs -> Right instrs
-  where
-    compileANormal' c t = case compileANormal c t of
-      Left err -> Left $ Match.UnsupportedConstruct (Text.pack (show err))
-      Right instrs -> Right instrs
+
+-- | Compile ability request branches with context threading
+compileRequestBranchesWithCtx ::
+  (Var v) =>
+  CompileCtx v ->
+  String ->
+  [(Reference, EC.EnumMap CTag ([Mem], ANormal Reference v))] ->
+  CompileResult ([WatInstr], CompileCtx v)
+compileRequestBranchesWithCtx ctx scrutLocal branches = do
+  instrs <- compileRequestBranches ctx scrutLocal branches
+  -- Thread context through all branches
+  let collectFromBranches (_, tagMap) c =
+        foldr (\(_, (_, body)) c' -> collectLocals c' body) c (EC.mapToList tagMap)
+      ctx' = foldr collectFromBranches ctx branches
+  pure (instrs, ctx')
 
 --------------------------------------------------------------------------------
 -- PAp Invocation (Dynamic Dispatch)

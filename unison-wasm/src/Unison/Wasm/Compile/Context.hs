@@ -71,7 +71,9 @@ data CompileCtx v = CompileCtx
     -- | Next yield point ID (for async FFI resume dispatch)
     ctxNextYieldPoint :: Int,
     -- | Whether this function has any yield points (async FFI calls)
-    ctxHasYieldPoints :: Bool
+    ctxHasYieldPoints :: Bool,
+    -- | Current function's index in the function table (for async resume)
+    ctxFuncTableIdx :: Int
   }
   deriving (Eq, Show)
 
@@ -91,7 +93,8 @@ emptyCtx =
       ctxBaseLocalCount = 0,
       ctxPendingArgs = 0,
       ctxNextYieldPoint = 0,
-      ctxHasYieldPoints = False
+      ctxHasYieldPoints = False,
+      ctxFuncTableIdx = 0
     }
 
 -- | Set the base local count after binding function parameters
