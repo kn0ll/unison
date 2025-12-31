@@ -12,11 +12,12 @@ demo/main> load src/pricing.u
 
   Loading changes detected in src/pricing.u.
 
-  + calculateDiscount     : Nat -> Nat
-  + calculatePrice        : Nat -> Nat
-  + calculatePriceWithLog : Nat -> Nat
-  + calculateSubtotal     : Nat -> Nat
-  + hasBulkDiscount       : Nat -> Boolean
+  + calculateDiscount       : Nat -> Nat
+  + calculatePrice          : Nat -> Nat
+  + calculatePriceWithDelay : Nat -> Nat ->{IO} Nat
+  + calculatePriceWithLog   : Nat -> Nat
+  + calculateSubtotal       : Nat -> Nat
+  + hasBulkDiscount         : Nat -> Boolean
 
   Run `update` to apply these changes to your codebase.
 

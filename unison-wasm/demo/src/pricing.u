@@ -35,7 +35,7 @@ calculateSubtotal quantity = quantity * 1000
 hasBulkDiscount : Nat -> Boolean
 hasBulkDiscount quantity = quantity >= 5
 
--- Calculate price with logging (demonstrates FFI)
+-- Calculate price with logging (demonstrates sync FFI)
 -- Same logic as calculatePrice but with Debug.trace
 calculatePriceWithLog : Nat -> Nat
 calculatePriceWithLog quantity =
@@ -44,3 +44,13 @@ calculatePriceWithLog quantity =
   subtotal = quantity * unitPrice
   discount = if quantity >= 5 then subtotal / 10 else 0
   subtotal - discount
+
+-- Calculate price with delay (demonstrates async FFI)
+-- Uses ##IO.delay.impl.v3 raw builtin
+calculatePriceWithDelay : Nat -> Nat -> Nat
+calculatePriceWithDelay delayMicros quantity =
+  _ = Debug.trace "starting delayed calculation" ()
+  _ = ##IO.delay.impl.v3 delayMicros
+  _ = Debug.trace "delay complete" ()
+  calculatePrice quantity
+

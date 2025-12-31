@@ -791,9 +791,9 @@ testForeignCallImport =
         -- Check that the import was generated
         let imports = moduleImports wasm
         expect (not (null imports))
-        -- The import should be for the "unison" namespace
+        -- The import should be for the "ffi" namespace
         case imports of
-          (imp : _) -> expect (importModule imp == "unison")
+          (imp : _) -> expect (importModule imp == "ffi")
           [] -> crash "Expected at least one import"
 
 -- | Test that foreign call generates correct WAT
@@ -809,7 +809,7 @@ testForeignCallWat =
       Left err -> crash $ "Compilation failed: " ++ err
       Right wat -> do
         -- Check that the import declaration is present
-        expect ("(import \"unison\" \"Text_toUtf8\"" `isInfixOf` wat)
+        expect ("(import \"ffi\" \"Text_toUtf8\"" `isInfixOf` wat)
         -- Check that the call instruction is present
         expect ("call $Text_toUtf8" `isInfixOf` wat)
 

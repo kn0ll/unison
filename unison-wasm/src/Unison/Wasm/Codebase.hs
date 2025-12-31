@@ -492,17 +492,17 @@ compileMultipleTermsToWasm ::
   [(Reference, Text)] ->  -- ^ List of (reference, exportName) pairs
   Either CodebaseError WatModule
 compileMultipleTermsToWasm terms entries = do
-  -- Convert each entry to a SuperGroup
+  -- Convert each entry to a SuperGroup, keeping the reference
   entrySuperGroups <- forM entries $ \(ref, exportName) -> do
     term <- case Map.lookup ref terms of
       Just t -> Right t
       Nothing -> Left (DependencyMissing ref)
     let (mainGroup, liftedCtx) =
           termToSuperGroupWithDataSpec builtinDataSpec exportName term
-    pure (mainGroup, Text.unpack exportName, liftedCtx)
+    pure (ref, mainGroup, Text.unpack exportName, liftedCtx)
 
   -- Collect all lifted groups from all entries
-  let allLiftedRaw = concatMap (\(_, _, lifted) -> lifted) entrySuperGroups
+  let allLiftedRaw = concatMap (\(_, _, _, lifted) -> lifted) entrySuperGroups
 
   -- Also include other terms as potential dependencies
   let entryRefs = Set.fromList (map fst entries)
@@ -526,8 +526,8 @@ compileMultipleTermsToWasm terms entries = do
 
       allLifted = sortOn (show . fst) (Map.toList allLiftedMap)
 
-  -- Compile all entries together
-  let entryPairs = [(sg, name) | (sg, name, _) <- entrySuperGroups]
+  -- Compile all entries together (now includes reference for cross-entry calls)
+  let entryPairs = [(ref, sg, name) | (ref, sg, name, _) <- entrySuperGroups]
 
   case compileMultipleWithLifted entryPairs allLifted of
     Left err -> Left (CompilationFailed err)

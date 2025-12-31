@@ -20,6 +20,11 @@ library
       Unison.Wasm.ABI
       Unison.Wasm.Codebase
       Unison.Wasm.Compile
+      Unison.Wasm.Compile.Builtins
+      Unison.Wasm.Compile.Context
+      Unison.Wasm.Compile.FFI
+      Unison.Wasm.Compile.Literal
+      Unison.Wasm.Compile.Match
       Unison.Wasm.Compile.Primitives
       Unison.Wasm.Compile.Runtime
       Unison.Wasm.Emit

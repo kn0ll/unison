@@ -64,18 +64,20 @@ export interface UnisonExports {
 
 /**
  * Foreign function definition for registration (sync).
+ * All Unison values are i64 (bigint in JS) to match the WASM ABI.
  */
 export interface ForeignDef {
   name: string;
-  handler: (runtime: UnisonRuntime, ...args: number[]) => number | void;
+  handler: (runtime: UnisonRuntime, ...args: bigint[]) => bigint | void;
 }
 
 /**
  * Async foreign function definition.
+ * All Unison values are i64 (bigint in JS) to match the WASM ABI.
  */
 export interface AsyncForeignDef {
   name: string;
-  handler: (runtime: UnisonRuntime, ...args: number[]) => Promise<bigint>;
+  handler: (runtime: UnisonRuntime, ...args: bigint[]) => Promise<bigint>;
 }
 
 // =============================================================================
@@ -225,14 +227,14 @@ export class UnisonRuntime {
 
     // Add registered foreign functions
     for (const [name, handler] of this.foreignFuncs) {
-      unisonNamespace[name] = (...args: number[]) => handler(this, ...args);
+      unisonNamespace[name] = (...args: bigint[]) => handler(this, ...args);
     }
 
     // Add default foreign functions
     this.addDefaultForeignFuncs(unisonNamespace);
 
     return {
-      unison: unisonNamespace,
+      ffi: unisonNamespace,  // Use 'ffi' namespace to match compiler imports
       ...customImports,
     };
   }
@@ -276,30 +278,20 @@ export class UnisonRuntime {
    * 4. When Promise resolves, resume the continuation
    */
   private addAsyncForeignFuncWrappers(ns: Record<string, (...args: any[]) => any>): void {
-    // IO.fetch: (urlPtr: i32) -> Text (async)
-    if (!this.asyncForeignFuncs.has('IO.fetch')) {
-      this.registerAsyncForeign('IO.fetch', async (_runtime, urlPtr: number) => {
-        const url = this.getText(urlPtr);
-        const response = await fetch(url);
-        const text = await response.text();
-        // Allocate text in WASM memory and return pointer
-        // For now, return the length as a placeholder
-        return BigInt(text.length);
-      });
-    }
-
-    // IO.delay: (ms: i64) -> () (async)
-    if (!this.asyncForeignFuncs.has('IO.delay')) {
-      this.registerAsyncForeign('IO.delay', async (_runtime, ms: number) => {
+    // IO.delay.impl.v3: (microseconds: i64) -> Either Failure ()
+    // The actual Unison builtin name is used to match compiler imports
+    if (!this.asyncForeignFuncs.has('IO.delay.impl.v3')) {
+      this.registerAsyncForeign('IO.delay.impl.v3', async (_runtime, microseconds: bigint) => {
+        const ms = Number(microseconds) / 1000;  // microseconds → milliseconds
         await new Promise(resolve => setTimeout(resolve, ms));
-        return 0n; // Unit
+        return 0n; // Unit (for now, should be Either)
       });
     }
 
-    // Wire up async functions to namespace
+    // Wire up async functions to namespace using sanitized names (. → _)
     for (const [name, handler] of this.asyncForeignFuncs) {
-      const wrapperName = name.replace('.', '_');
-      ns[wrapperName] = (...args: number[]) => {
+      const wrapperName = name.replace(/\./g, '_');  // All dots to underscores
+      ns[wrapperName] = (...args: bigint[]) => {
         // Check for nested async
         if (this.asyncState === AsyncState.Yielded) {
           throw new NestedAsyncError();

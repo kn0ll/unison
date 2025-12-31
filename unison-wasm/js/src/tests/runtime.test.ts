@@ -61,7 +61,7 @@ describe('UnisonRuntime', () => {
     it('registers foreign functions', () => {
       const runtime = createRuntime();
       runtime.registerForeign('myFunc', () => {
-        return 42;
+        return 42n;  // bigint to match WASM ABI
       });
       // Can't directly test without loading WASM, but registration should not throw
       assert.ok(true);

@@ -5,34 +5,26 @@
  * - Browser (compiled to WASM)
  * - Server (same WASM via Node.js)
  *
+ * Uses UnisonRuntime from @unison/wasm-runtime for consistent FFI handling.
+ *
  * The "Drift Mode" feature demonstrates what goes wrong when
  * frontend and backend have different implementations.
  */
 
-// WASM module interface - all pricing functions compiled from Unison
-interface WasmExports {
-  calculatePrice: (qty: bigint) => bigint;
-  calculateDiscount: (qty: bigint) => bigint;
-  calculateSubtotal: (qty: bigint) => bigint;
-  calculatePriceWithLog: (qty: bigint) => bigint;
-  memory: WebAssembly.Memory;
+// UnisonRuntime is loaded separately via index.html and available globally
+// This avoids bundler complexity for the demo
+interface IUnisonRuntime {
+  registerForeign(name: string, handler: (rt: IUnisonRuntime, ...args: bigint[]) => bigint | void): void;
+  registerAsyncForeign(name: string, handler: (rt: IUnisonRuntime, ...args: bigint[]) => Promise<bigint>): void;
+  loadWasm(bytes: BufferSource): Promise<void>;
+  call(funcName: string, ...args: unknown[]): unknown;
+  run(funcName: string, ...args: unknown[]): Promise<bigint>;
+  getText(ptr: number): string;
 }
 
-interface DemoRuntime {
-  exports: WasmExports | null;
-  call: (name: keyof Omit<WasmExports, 'memory'>, arg: bigint) => bigint;
-}
+declare const UnisonRuntime: new () => IUnisonRuntime;
 
-const runtime: DemoRuntime = {
-  exports: null,
-  call(name, arg) {
-    if (!this.exports) throw new Error('WASM not loaded');
-    const fn = this.exports[name];
-    if (typeof fn !== 'function') throw new Error(`${name} is not a function`);
-    return fn(arg);
-  }
-};
-
+let runtime: IUnisonRuntime | null = null;
 let driftMode = false;
 
 // DOM Elements
@@ -102,7 +94,7 @@ async function init(): Promise<void> {
 }
 
 /**
- * Load the compiled WASM module
+ * Load the compiled WASM module using UnisonRuntime
  */
 async function loadWasm(): Promise<void> {
   const response = await fetch('./dist/pricing.wasm');
@@ -114,48 +106,42 @@ async function loadWasm(): Promise<void> {
   }
   const bytes = await response.arrayBuffer();
 
-  // FFI handlers for Debug.trace and Debug.watch
-  // Uses the 'ffi' namespace to match WASM imports
-  let memory: WebAssembly.Memory;
+  // Create UnisonRuntime instance (same as server.ts)
+  runtime = new UnisonRuntime();
 
-  const readText = (ptr: bigint): string => {
-    try {
-      const view = new DataView(memory.buffer);
-      const ptrNum = Number(ptr);
-      const byteLen = view.getUint32(ptrNum + 8, true);  // TEXT_BYTELEN_OFFSET
-      const bytes = new Uint8Array(memory.buffer, ptrNum + 16, byteLen);  // TEXT_BYTES_OFFSET
-      return new TextDecoder().decode(bytes);
-    } catch {
-      return `<ptr:${ptr}>`;
-    }
-  };
+  // Register sync FFI handlers for Debug.trace/watch
+  runtime.registerForeign('Debug_trace', (rt, textPtr: bigint, _valPtr: bigint): bigint => {
+    const text = rt.getText(Number(textPtr));
+    console.log(`[trace] ${text}`);
+    return 0n; // Unit
+  });
 
-  const imports: WebAssembly.Imports = {
-    ffi: {
-      // Debug.trace : Text -> a -> ()
-      Debug_trace: (textPtr: bigint, _valPtr: bigint): bigint => {
-        console.log(`[trace] ${readText(textPtr)}`);
-        return 0n;
-      },
-      // Debug.watch : Text -> a -> a
-      Debug_watch: (textPtr: bigint): bigint => {
-        console.log(`[watch] ${readText(textPtr)}`);
-        return textPtr;
-      },
-    },
-  };
+  runtime.registerForeign('Debug_watch', (rt, textPtr: bigint): bigint => {
+    const text = rt.getText(Number(textPtr));
+    console.log(`[watch] ${text}`);
+    return textPtr;
+  });
 
-  const module = await WebAssembly.instantiate(bytes, imports);
-  memory = module.instance.exports.memory as WebAssembly.Memory;
-  runtime.exports = module.instance.exports as unknown as WasmExports;
+  // IO.delay.impl.v3 handler - sync stub for browser
+  // Full async would require yield/resume
+  runtime.registerForeign('IO_delay_impl_v3', (_rt, microseconds: bigint): bigint => {
+    const ms = Number(microseconds) / 1000;
+    console.log(`[IO.delay] ${ms}ms (sync stub)`);
+    return 0n; // Unit
+  });
+
+  // Load the WASM module
+  await runtime.loadWasm(bytes);
+
   console.log('✅ WASM module loaded');
 }
-
 
 /**
  * Update the price display based on current quantity
  */
 function updatePrice(): void {
+  if (!runtime) return;
+
   const qty = BigInt(qtySlider.value);
 
   // Call all WASM functions - compiled from Unison
@@ -178,6 +164,8 @@ function updatePrice(): void {
  * Verify the calculation with the actual server
  */
 async function verifyWithServer(): Promise<void> {
+  if (!runtime) return;
+
   const qty = parseInt(qtySlider.value);
   const clientPrice = Number(runtime.call('calculatePrice', BigInt(qty)));
 
@@ -268,9 +256,9 @@ function showError(message: string): void {
 function exposeToDevTools(): void {
   (window as unknown as Record<string, unknown>)['unisonRuntime'] = {
     runtime,
-    calculatePrice: (qty: number) => Number(runtime.call('calculatePrice', BigInt(qty))),
-    calculateDiscount: (qty: number) => Number(runtime.call('calculateDiscount', BigInt(qty))),
-    calculateSubtotal: (qty: number) => Number(runtime.call('calculateSubtotal', BigInt(qty))),
+    calculatePrice: (qty: number) => runtime ? Number(runtime.call('calculatePrice', BigInt(qty))) : 0,
+    calculateDiscount: (qty: number) => runtime ? Number(runtime.call('calculateDiscount', BigInt(qty))) : 0,
+    calculateSubtotal: (qty: number) => runtime ? Number(runtime.call('calculateSubtotal', BigInt(qty))) : 0,
   };
   console.log('🔧 Dev tools: window.unisonRuntime');
 }

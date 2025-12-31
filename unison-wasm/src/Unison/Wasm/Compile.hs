@@ -25,13 +25,16 @@ module Unison.Wasm.Compile
     CompileError (..),
     CompileResult,
 
-    -- * Context
+    -- * Context (re-exported from Compile.Context)
     CompileCtx (..),
     emptyCtx,
     lookupVar,
     bindVars,
     setBaseLocalCount,
     getSaveableLocalCount,
+    memToValType,
+    refToFuncName,
+    sanitizeName,
 
     -- * Foreign Calls
     foreignFuncToImportName,
@@ -46,9 +49,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Text.Encoding qualified as Text.Encoding
-import Unison.Util.Text qualified as UText
-import Data.Word (Word8, Word32, Word64)
+import Data.Word (Word32, Word64)
 import Unison.ABT.Normalized qualified as ABTN
 import Unison.Hash qualified as Hash
 import Unison.Reference (Reference)
@@ -75,15 +76,30 @@ import Unison.Runtime.ANF
     pattern TVar,
   )
 import Unison.Runtime.ANF.POp (POp (..))
-import Unison.Runtime.Foreign.Function.Type (ForeignFunc (..), foreignFuncBuiltinName)
+import Unison.Runtime.Foreign.Function.Type (ForeignFunc (..))
 import Unison.Runtime.TypeTags (CTag, rawTag)
 import Unison.Util.EnumContainers qualified as EC
 import Unison.Var (Var)
 import Unison.Var qualified as Var
 import Unison.Wasm.ABI qualified as ABI
+import Unison.Wasm.Compile.Builtins qualified as Builtins
+import Unison.Wasm.Compile.Context
+  ( CompileCtx (..),
+    emptyCtx,
+    bindVars,
+    lookupVar,
+    setBaseLocalCount,
+    getSaveableLocalCount,
+    memToValType,
+    refToFuncName,
+    sanitizeName,
+  )
+import Unison.Wasm.Compile.FFI qualified as FFI
+import Unison.Wasm.Compile.Literal qualified as Literal
+import Unison.Wasm.Compile.Match qualified as Match
 import Unison.Wasm.Compile.Primitives qualified as P
 import Unison.Wasm.Compile.Runtime qualified as Runtime
-import Unison.Wasm.Emit (WatFunction (..), WatImport (..), WatImportKind (..), WatInstr (..), WatModule (..), WatValType (..))
+import Unison.Wasm.Emit (WatFunction (..), WatImport (..), WatInstr (..), WatModule (..), WatValType (..))
 
 -- | Compilation errors
 data CompileError
@@ -102,101 +118,7 @@ data CompileError
 -- | Compilation result
 type CompileResult a = Either CompileError a
 
--- | Compilation context tracking variable bindings and function names
-data CompileCtx v = CompileCtx
-  { -- | Map from variable to (local index, memory classification)
-    ctxVars :: Map v (Int, Mem),
-    -- | Next available local index
-    ctxNextLocal :: Int,
-    -- | Collected local declarations
-    ctxLocals :: [(String, WatValType)],
-    -- | Current function name (for recursive calls)
-    ctxCurrentFunc :: String,
-    -- | Map from combinator variable to function name (for mutual recursion)
-    ctxFuncNames :: Map v String,
-    -- | Map from Reference to function name (for lifted combinators)
-    ctxRefNames :: Map Reference String,
-    -- | Map from variable to function arity (for PAp creation)
-    ctxFuncArities :: Map v Int,
-    -- | Map from Reference to function arity (for lifted combinators)
-    ctxRefArities :: Map Reference Int,
-    -- | Map from Reference to function table index (for call_indirect)
-    ctxRefTableIndices :: Map Reference Int,
-    -- | Number of locals at function entry (for Push frame saved_count)
-    -- This is set at the start of compiling a function and doesn't change
-    ctxBaseLocalCount :: Int,
-    -- | Current pending args count (for ability frames)
-    ctxPendingArgs :: Int
-  }
-  deriving (Eq, Show)
-
--- | Empty compilation context
-emptyCtx :: CompileCtx v
-emptyCtx =
-  CompileCtx
-    { ctxVars = Map.empty,
-      ctxNextLocal = 0,
-      ctxLocals = [],
-      ctxCurrentFunc = "",
-      ctxFuncNames = Map.empty,
-      ctxRefNames = Map.empty,
-      ctxFuncArities = Map.empty,
-      ctxRefArities = Map.empty,
-      ctxRefTableIndices = Map.empty,
-      ctxBaseLocalCount = 0,
-      ctxPendingArgs = 0
-    }
-
--- | Set the base local count after binding function parameters
--- This should be called after binding params but before compiling the body
-setBaseLocalCount :: CompileCtx v -> CompileCtx v
-setBaseLocalCount ctx = ctx { ctxBaseLocalCount = ctxNextLocal ctx }
-
--- | Get the number of locals to save in a Push frame
--- This is current local count minus base (params only, not saved)
-getSaveableLocalCount :: CompileCtx v -> Int
-getSaveableLocalCount ctx = ctxNextLocal ctx - ctxBaseLocalCount ctx
-
--- | Look up a variable in the context
-lookupVar :: (Var v) => v -> CompileCtx v -> Maybe (Int, Mem)
-lookupVar v ctx = Map.lookup v (ctxVars ctx)
-
--- | Bind variables with their memory classifications
-bindVars :: (Var v) => [(v, Mem)] -> CompileCtx v -> CompileCtx v
-bindVars bindings ctx =
-  let indexed = zip bindings [ctxNextLocal ctx ..]
-      newVars = Map.fromList [(v, (i, m)) | ((v, m), i) <- indexed]
-      -- Use index-based names ("p0", "p1", etc.) to match generated code
-      newLocals = [("p" ++ show i, memToValType m) | ((_, m), i) <- indexed]
-   in ctx
-        { ctxVars = Map.union newVars (ctxVars ctx),
-          ctxNextLocal = ctxNextLocal ctx + length bindings,
-          ctxLocals = ctxLocals ctx ++ newLocals
-        }
-
--- | Convert memory classification to WASM type
---
--- NOTE: BX (boxed) is currently treated as I64 because the ANF classifier
--- marks many unboxed values as BX. Proper I32 pointers require fixing
--- the ANF output and updating the K-frame implementation.
-memToValType :: Mem -> WatValType
-memToValType UN = I64 -- Unboxed: 64-bit value
-memToValType BX = I64 -- TODO: optimize to I32 for 32-bit pointers
-
--- | Generate a short function name from a Reference
--- Uses base32hex encoding for hash, truncated for readability
-refToFuncName :: Reference -> String
-refToFuncName (Reference.Builtin name) = "builtin_" ++ sanitizeName (Text.unpack name)
-refToFuncName (Reference.DerivedId (Reference.Id hash _)) =
-  -- Use first 8 chars of the base32hex hash for a readable name
-  "fn_" ++ take 8 (Text.unpack (Hash.toBase32HexText hash))
-
--- | Sanitize a string to be a valid WASM identifier
--- Replaces invalid characters with underscores
-sanitizeName :: String -> String
-sanitizeName = map (\c -> if isValidIdChar c then c else '_')
-  where
-    isValidIdChar c = c `elem` ['a'..'z'] || c `elem` ['A'..'Z'] || c `elem` ['0'..'9'] || c == '_'
+-- Context types and functions are now in Compile.Context
 
 --------------------------------------------------------------------------------
 -- SuperGroup Compilation
@@ -301,28 +223,34 @@ compileGroupWithLifted (Rec localDefs entry) liftedGroups exportName = do
 
 -- | Compile multiple entry points into a single WASM module.
 --
--- Each entry is a (SuperGroup, exportName) pair.
+-- Each entry is a (Reference, SuperGroup, exportName) triple.
 -- All entries share the same lifted combinators (dependencies).
 compileMultipleWithLifted ::
   (Var v) =>
-  [(SuperGroup Reference v, String)] ->
+  [(Reference, SuperGroup Reference v, String)] ->
   [(Reference, SuperGroup Reference v)] ->
   CompileResult WatModule
 compileMultipleWithLifted entries liftedGroups = do
-  -- Build a map from Reference to function name for all lifted combinators
-  let refNames = Map.fromList [(ref, refToFuncName ref) | (ref, _) <- liftedGroups]
+  -- Build a map from Reference to function name for all lifted combinators AND entry points
+  let liftedRefNames = [(ref, refToFuncName ref) | (ref, _) <- liftedGroups]
+      entryRefNames = [(ref, exportName) | (ref, _, exportName) <- entries]
+      refNames = Map.fromList (liftedRefNames ++ entryRefNames)
 
-  -- Build a map from Reference to arity for all lifted combinators
-  let refArities = Map.fromList [(ref, superGroupArity sg) | (ref, sg) <- liftedGroups]
+  -- Build a map from Reference to arity for all lifted combinators AND entry points
+  let liftedArities = [(ref, superGroupArity sg) | (ref, sg) <- liftedGroups]
+      entryArities = [(ref, superGroupArity sg) | (ref, sg, _) <- entries]
+      refArities = Map.fromList (liftedArities ++ entryArities)
 
   -- Build a map from Reference to table index
-  let refTableIndices = Map.fromList $ zip (map fst liftedGroups) [0..]
+  let liftedIndices = zip (map fst liftedGroups) [0..]
+      entryIndices = zip [ref | (ref, _, _) <- entries] [length liftedGroups..]
+      refTableIndices = Map.fromList (liftedIndices ++ entryIndices)
 
   -- Compile lifted combinators first
   liftedFuncs <- concat <$> mapM (compileLiftedGroup refNames refArities refTableIndices) liftedGroups
 
   -- Compile each entry point
-  entryFuncsWithLocals <- mapM (\(Rec localDefs entry, exportName) -> do
+  entryFuncsWithLocals <- mapM (\(_ref, Rec localDefs entry, exportName) -> do
     -- Build function name map for local definitions in this entry's group
     let funcNames = Map.fromList [(v, Text.unpack (Var.name v)) | (v, _) <- localDefs]
     let funcArities = Map.fromList [(v, superNormalArity sn) | (v, sn) <- localDefs]
@@ -337,7 +265,7 @@ compileMultipleWithLifted entries liftedGroups = do
 
   let allLocalFuncs = concatMap fst entryFuncsWithLocals
       allEntryFuncs = map snd entryFuncsWithLocals
-      exportNames = map snd entries
+      exportNames = [name | (_, _, name) <- entries]
 
   -- Merge: runtime + lifted functions + local functions + entry functions
   let allFuncs = Runtime.runtimeFunctions ++ liftedFuncs ++ allLocalFuncs ++ allEntryFuncs
@@ -346,9 +274,9 @@ compileMultipleWithLifted entries liftedGroups = do
       tableFuncs = map funcName userFuncs
 
   -- Collect FFI calls (foreign functions + debug primitives)
-  let allForeignCalls = concatMap (\(sg, _) -> collectForeignCallsFromGroups sg liftedGroups) entries
+  let allForeignCalls = concatMap (\(_, sg, _) -> collectForeignCallsFromGroups sg liftedGroups) entries
       foreignImports = foreignFuncsToImports allForeignCalls
-      allDebugBuiltins = concatMap (\(sg, _) -> collectDebugBuiltinsFromGroups sg liftedGroups) entries
+      allDebugBuiltins = concatMap (\(_, sg, _) -> collectDebugBuiltinsFromGroups sg liftedGroups) entries
       debugImports = debugBuiltinsToImports (nub allDebugBuiltins)
       imports = foreignImports ++ debugImports
       nub = map head . groupBy (==) . sort
@@ -572,7 +500,7 @@ collectLocals ctx (TMatch _ (MatchData _ref cases defaultCase)) =
   -- Collect from all branches, including field bindings for each case
   let collectCase (_, (mems, body)) c =
         -- Extract field variables from TAbs wrappers and bind them
-        let (fieldVars, innerBody) = extractAbsVars body
+        let (fieldVars, innerBody) = Match.extractAbsVars body
             fieldBindings = zip fieldVars mems
             c' = if null mems then c else bindVars fieldBindings c
          in collectLocals c' innerBody
@@ -584,7 +512,7 @@ collectLocals ctx (TMatch _ (MatchRequest abilityBranches pureCase)) =
   -- Collect from pure case and all ability branches
   let collectAbility (_ref, tagCases) c =
         foldr (\(_, (mems, body)) c' ->
-          let (fieldVars, innerBody) = extractAbsVars body
+          let (fieldVars, innerBody) = Match.extractAbsVars body
               fieldBindings = zip fieldVars mems
               c'' = if null mems then c' else bindVars fieldBindings c'
            in collectLocals c'' innerBody) c (EC.mapToList tagCases)
@@ -656,16 +584,21 @@ compileANormal ctx (TApp (FComb ref) args) = do
   argInstrs <- concat <$> mapM (compileANormal ctx . TVar) args
   let numArgs = length args
   case ref of
-    -- Builtin references: map to primitive operations
+    -- Builtin references: map to primitive operations or foreign functions
     Reference.Builtin name -> do
       -- Try to map builtin to primitive op
       case builtinToPrimOp name numArgs of
         Just opInstrs -> pure $ argInstrs ++ opInstrs
         Nothing ->
-          -- Unknown builtin - fall back to function call if we have a name
-          if null (ctxCurrentFunc ctx)
-            then Left $ UnsupportedConstruct $ "Unknown builtin: " <> name
-            else pure $ argInstrs ++ [Call (ctxCurrentFunc ctx)]
+          -- Check if it's a foreign function
+          case builtinNameToForeignFunc name of
+            Just ff -> do
+              -- Foreign function call - emit import call
+              let funcName = foreignFuncToImportName ff
+              pure $ argInstrs ++ [Call funcName]
+            Nothing ->
+              -- Unknown builtin
+              Left $ UnsupportedConstruct $ "Unknown builtin: " <> name
     -- Derived reference: look up in refNames for lifted combinators
     Reference.DerivedId _ -> do
       case Map.lookup ref (ctxRefNames ctx) of
@@ -964,7 +897,7 @@ compileANormal ctx (TMatch v (MatchData _ref cases defaultCase)) = do
 
   if null dataCases
     then -- All enum cases: use simple if-else chain
-      compileIfElseChain ctx v enumCases defaultCase
+      compileIntegralMatch ctx v enumCases defaultCase
     else -- Mixed cases with field bindings
       compileDataMatch ctx v allCases defaultCase
 
@@ -1495,296 +1428,63 @@ storeDataGFields ctx (field : rest) idx = do
 -- Pattern Matching
 --------------------------------------------------------------------------------
 
+--------------------------------------------------------------------------------
+-- Pattern Matching (delegated to Compile.Match)
+--------------------------------------------------------------------------------
+
+-- | Adapter to convert Match.CompileError to our CompileError
+adaptMatchError :: Match.CompileError -> CompileError
+adaptMatchError (Match.UnsupportedConstruct msg) = UnsupportedConstruct msg
+
 -- | Compile MatchIntegral/MatchNumeric with full multi-case support
---
--- Supports an arbitrary number of cases using an if-else chain.
--- Each case compares the scrutinee against a value and branches
--- to the appropriate body.
 compileIntegralMatch ::
-  (Var v) =>
-  CompileCtx v ->
-  v ->                                   -- Scrutinee variable
-  [(Word64, ANormal Reference v)] ->     -- Cases: (value, body)
-  Maybe (ANormal Reference v) ->         -- Default case
-  CompileResult [WatInstr]
-
--- No cases, just default
-compileIntegralMatch ctx _ [] (Just body) = compileANormal ctx body
-
--- No cases, no default - error
-compileIntegralMatch _ _ [] Nothing =
-  Left $ UnsupportedConstruct "MatchIntegral with no cases and no default"
-
--- Single case with default: simple if-else
-compileIntegralMatch ctx scrutVar [(caseVal, thenBody)] (Just elseBody) = do
-  scrutInstrs <- compileANormal ctx (TVar scrutVar)
-  thenInstrs <- compileANormal ctx thenBody
-  elseInstrs <- compileANormal ctx elseBody
-  pure $
-    scrutInstrs
-      ++ [I64Const caseVal, I64Eq]
-      ++ [If I64 thenInstrs elseInstrs]
-
--- Single case, no default (must be exhaustive)
-compileIntegralMatch ctx scrutVar [(caseVal, thenBody)] Nothing = do
-  scrutInstrs <- compileANormal ctx (TVar scrutVar)
-  thenInstrs <- compileANormal ctx thenBody
-  pure $
-    scrutInstrs
-      ++ [I64Const caseVal, I64Eq]
-      ++ [If I64 thenInstrs [Unreachable]]
-
--- Multiple cases: if-else chain
--- We build a nested if-else structure where each condition checks one case value
-compileIntegralMatch ctx scrutVar cases mDefault = do
-  compileIfElseChain ctx scrutVar cases mDefault
-
--- | Compile an if-else chain for multiple integral cases
-compileIfElseChain ::
   (Var v) =>
   CompileCtx v ->
   v ->
   [(Word64, ANormal Reference v)] ->
   Maybe (ANormal Reference v) ->
   CompileResult [WatInstr]
+compileIntegralMatch ctx scrutVar cases mDefault =
+  case Match.compileIntegralMatch compileANormal' ctx scrutVar cases mDefault of
+    Left err -> Left $ adaptMatchError err
+    Right instrs -> Right instrs
+  where
+    compileANormal' c t = case compileANormal c t of
+      Left err -> Left $ Match.UnsupportedConstruct (Text.pack (show err))
+      Right instrs -> Right instrs
 
--- Base case: no more cases, use default
-compileIfElseChain ctx _ [] (Just dflt) = compileANormal ctx dflt
-compileIfElseChain _ _ [] Nothing = pure [Unreachable]
-
--- Recursive case: check one case, else check the rest
-compileIfElseChain ctx scrutVar ((caseVal, body):rest) mDefault = do
-  -- Load scrutinee for comparison
-  scrutInstrs <- compileANormal ctx (TVar scrutVar)
-  -- Compile this case's body
-  thenInstrs <- compileANormal ctx body
-  -- Compile the else branch (remaining cases)
-  elseInstrs <- compileIfElseChain ctx scrutVar rest mDefault
-  pure $
-    scrutInstrs
-      ++ [I64Const caseVal, I64Eq]
-      ++ [If I64 thenInstrs elseInstrs]
-
---------------------------------------------------------------------------------
--- Data Matching with Field Bindings
---------------------------------------------------------------------------------
-
--- | Compile MatchData with potential field bindings.
---
--- For each case that has fields, we:
--- 1. Check the constructor tag
--- 2. Extract fields from the heap object
--- 3. Bind fields to local variables
--- 4. Execute the case body
+-- | Compile MatchData with potential field bindings
 compileDataMatch ::
-  (Var v) =>
-  CompileCtx v ->
-  v ->                                        -- Scrutinee variable
-  [(CTag, ([Mem], ANormal Reference v))] ->   -- Cases with field info
-  Maybe (ANormal Reference v) ->              -- Default case
-  CompileResult [WatInstr]
-compileDataMatch ctx scrutVar cases mDefault = do
-  compileDataMatchChain ctx scrutVar cases mDefault
-
--- | Build an if-else chain for data matching
-compileDataMatchChain ::
   (Var v) =>
   CompileCtx v ->
   v ->
   [(CTag, ([Mem], ANormal Reference v))] ->
   Maybe (ANormal Reference v) ->
   CompileResult [WatInstr]
-
--- Base case: no more cases
-compileDataMatchChain ctx _ [] (Just dflt) = compileANormal ctx dflt
-compileDataMatchChain _ _ [] Nothing = pure [Unreachable]
-
--- Recursive case: check one case
-compileDataMatchChain ctx scrutVar ((tag, (mems, body)):rest) mDefault = do
-  -- Load scrutinee tag (i64) for comparison
-  scrutInstrs <- compileANormal ctx (TVar scrutVar)
-  let tagVal = rawTag tag
-
-  -- Compile body with field bindings
-  bodyInstrs <- if null mems
-    then compileANormal ctx body
-    else compileWithFieldBindings ctx scrutVar mems body
-
-  -- Compile else branch
-  elseInstrs <- compileDataMatchChain ctx scrutVar rest mDefault
-
-  pure $
-    scrutInstrs
-      ++ [I64Const tagVal, I64Eq]
-      ++ [If I64 bodyInstrs elseInstrs]
-
--- | Compile a case body after extracting and binding fields from a data object.
---
--- The scrutinee is a pointer (i64) to a Data1/Data2/DataG object.
--- We extract each field and bind it to a fresh local variable.
-compileWithFieldBindings ::
-  (Var v) =>
-  CompileCtx v ->
-  v ->                     -- Scrutinee variable (holds pointer to data object)
-  [Mem] ->                 -- Field memory classifications (extracted from ANormal)
-  ANormal Reference v ->   -- Body (with ABTN.TAbs wrapping field bindings)
-  CompileResult [WatInstr]
-compileWithFieldBindings ctx scrutVar mems body = do
-  -- The body should be wrapped in TAbs nodes that introduce field variables
-  -- We need to unwrap it and extract the field variable names
-  let (fieldVars, innerBody) = extractAbsVars body
-
-  -- If the number of field variables doesn't match mems, something is wrong
-  if length fieldVars /= length mems
-    then Left $ UnsupportedConstruct $
-           "Field count mismatch: expected " <> Text.pack (show (length mems))
-           <> " but got " <> Text.pack (show (length fieldVars))
-    else do
-      -- Create context with field bindings
-      let fieldBindings = zip fieldVars mems
-          newCtx = bindVars fieldBindings ctx
-
-      -- Get the scrutinee as a pointer
-      let (scrutIdx, _) = case lookupVar scrutVar ctx of
-            Just x -> x
-            Nothing -> (-1, UN)  -- Will error below
-          scrutLocal = "p" ++ show scrutIdx
-
-      -- Generate field extraction code
-      extractInstrs <- extractDataFields scrutLocal mems newCtx fieldVars
-
-      -- Compile the inner body with new context
-      bodyInstrs <- compileANormal newCtx innerBody
-
-      pure $ extractInstrs ++ bodyInstrs
-
--- | Extract bound variables from nested TAbs wrappers
-extractAbsVars :: (Var v) => ANormal Reference v -> ([v], ANormal Reference v)
-extractAbsVars (ABTN.TAbs v rest) =
-  let (moreVars, inner) = extractAbsVars rest
-   in (v : moreVars, inner)
-extractAbsVars other = ([], other)
+compileDataMatch ctx scrutVar cases mDefault =
+  case Match.compileDataMatch compileANormal' ctx scrutVar cases mDefault of
+    Left err -> Left $ adaptMatchError err
+    Right instrs -> Right instrs
+  where
+    compileANormal' c t = case compileANormal c t of
+      Left err -> Left $ Match.UnsupportedConstruct (Text.pack (show err))
+      Right instrs -> Right instrs
 
 -- | Compile ability request branches for MatchRequest
--- Each branch is (ability_ref, cases_map) where cases_map maps operation tags to handlers
 compileRequestBranches ::
   (Var v) =>
   CompileCtx v ->
-  String ->                                            -- Scrutinee local name
-  [(Reference, EC.EnumMap CTag ([Mem], ANormal Reference v))] ->  -- Ability branches
+  String ->
+  [(Reference, EC.EnumMap CTag ([Mem], ANormal Reference v))] ->
   CompileResult [WatInstr]
-compileRequestBranches _ctx _scrutLocal [] =
-  -- No branches, unhandled ability request
-  pure [Unreachable]
-compileRequestBranches ctx scrutLocal ((ref, casesMap) : rest) = do
-  -- Generate code for this ability's operations
-  let abilityRef = refToI32 ref
-      cases = EC.mapToList casesMap
-
-  -- For MVP: generate if-else chain for operations within this ability
-  -- In a full implementation, we'd first check the ability ref, then dispatch on operation
-  opCaseInstrs <- compileOperationCases ctx scrutLocal cases
-
-  -- Compile remaining abilities
-  restInstrs <- compileRequestBranches ctx scrutLocal rest
-
-  -- For MVP, we assume all requests are for this ability
-  -- Full implementation would extract ability ref from packed tag and compare
-  if null rest
-    then pure $ [Comment $ "MatchRequest: ability ref " ++ show abilityRef] ++ opCaseInstrs
-    else do
-      -- If not handled here, try next ability (as else branch)
-      pure $ [Comment $ "MatchRequest: ability ref " ++ show abilityRef] ++ opCaseInstrs ++ restInstrs
-
--- | Compile operation cases within an ability
-compileOperationCases ::
-  (Var v) =>
-  CompileCtx v ->
-  String ->                                        -- Scrutinee local name
-  [(CTag, ([Mem], ANormal Reference v))] ->        -- (operation tag, (args mems, body))
-  CompileResult [WatInstr]
-compileOperationCases _ctx _scrutLocal [] = pure [Unreachable]
-compileOperationCases ctx scrutLocal [(_tag, (mems, body))] = do
-  -- Single case: just compile the body with field bindings
-  if null mems
-    then compileANormal ctx body
-    else do
-      -- The body has TAbs wrappers for the operation arguments
-      let (fieldVars, innerBody) = extractAbsVars body
-      if length fieldVars /= length mems
-        then compileANormal ctx body  -- Fallback if mismatch
-        else do
-          let fieldBindings = zip fieldVars mems
-              newCtx = bindVars fieldBindings ctx
-          -- Generate field extraction code (from request object)
-          extractInstrs <- extractDataFields scrutLocal mems newCtx fieldVars
-          bodyInstrs <- compileANormal newCtx innerBody
-          pure $ extractInstrs ++ bodyInstrs
-
-compileOperationCases ctx scrutLocal ((tag, (mems, body)) : rest) = do
-  let tagVal = rawTag tag
-
-  -- Compile this operation's body
-  thenInstrs <- compileOperationCases ctx scrutLocal [(tag, (mems, body))]
-
-  -- Compile remaining operations
-  elseInstrs <- compileOperationCases ctx scrutLocal rest
-
-  pure
-    [ Comment $ "  Operation tag: " ++ show tagVal
-    -- Load operation tag from request object
-    , LocalGet scrutLocal
-    , I32WrapI64
-    , I32Load (fromIntegral ABI.enumCtorIdOffset)
-    , I32Const (fromIntegral tagVal)
-    , I32Eq
-    , If I64 thenInstrs elseInstrs
-    ]
-
--- | Generate instructions to extract fields from a data object.
---
--- Uses ABI offsets to load fields as TypedSlots.
-extractDataFields ::
-  (Var v) =>
-  String ->        -- Scrutinee local name (holds pointer)
-  [Mem] ->         -- Field memory classifications
-  CompileCtx v ->  -- New context with field bindings
-  [v] ->           -- Field variable names
-  CompileResult [WatInstr]
-extractDataFields _ [] _ [] = pure []
-extractDataFields scrutLocal (mem : restMems) ctx (fieldVar : restVars) = do
-  let numFields = length restMems + 1
-      fieldIdx = numFields - 1 - length restMems  -- 0-indexed field position
-
-  -- Determine offset based on number of fields (Data1, Data2, DataG)
-  let fieldOffset = case numFields of
-        1 -> fromIntegral ABI.data1Field0Offset + 8  -- Skip TypeTag
-        2 | fieldIdx == 0 -> fromIntegral ABI.data2Field0Offset + 8
-          | otherwise -> fromIntegral ABI.data2Field1Offset + 8
-        _ -> fromIntegral ABI.dataGFieldsOffset +
-             fromIntegral fieldIdx * fromIntegral ABI.typedSlotSize + 8
-
-  -- Get the local name for this field
-  let (localIdx, _) = case lookupVar fieldVar ctx of
-        Just x -> x
-        Nothing -> (-1, UN)
-      localName = "p" ++ show localIdx
-
-  -- Generate extraction instruction
-  -- The scrutinee is an i64 (boxed pointer), so we need to wrap it to i32
-  let extractInstr =
-        [ LocalGet scrutLocal
-        , I32WrapI64          -- Convert i64 to i32 pointer
-        , case mem of
-            UN -> I64Load fieldOffset  -- Unboxed: load payload directly
-            BX -> I64Load fieldOffset  -- Boxed: load payload (another pointer)
-        , LocalSet localName
-        ]
-
-  restInstrs <- extractDataFields scrutLocal restMems ctx restVars
-  pure $ extractInstr ++ restInstrs
-
-extractDataFields _ _ _ _ = pure [] -- Mismatched lengths, shouldn't happen
+compileRequestBranches ctx scrutLocal branches =
+  case Match.compileRequestBranches compileANormal' ctx scrutLocal branches of
+    Left err -> Left $ adaptMatchError err
+    Right instrs -> Right instrs
+  where
+    compileANormal' c t = case compileANormal c t of
+      Left err -> Left $ Match.UnsupportedConstruct (Text.pack (show err))
+      Right instrs -> Right instrs
 
 --------------------------------------------------------------------------------
 -- PAp Invocation (Dynamic Dispatch)
@@ -1947,235 +1647,41 @@ compileApplyPAp papLocal numNewArgs argInstrs =
 
 -- | Compile a literal to WASM instructions
 -- Note: All values are stored as i64, so floats are reinterpreted to i64.
+-- Literal compilation is now in Compile.Literal
 compileLit :: Lit Reference -> CompileResult [WatInstr]
-compileLit (N n) = pure [I64Const n]
-compileLit (I n) = pure [I64Const (fromIntegral n)]
-compileLit (F f) = pure [F64Const f, I64ReinterpretF64]  -- Store as i64
-compileLit (C c) = pure [I64Const (fromIntegral (fromEnum c))]  -- Unicode codepoint as i64
-compileLit (T utext) = pure $ compileTextLit utext
-compileLit (LM _) = Left $ UnsupportedConstruct "Term links not yet supported"
-compileLit (LY _) = Left $ UnsupportedConstruct "Type links not yet supported"
-
--- | Compile a Text literal to WASM instructions.
---
--- Strategy: Allocate heap space and store UTF-8 bytes inline.
--- Uses __text_temp local for the pointer.
-compileTextLit :: UText.Text -> [WatInstr]
-compileTextLit utext =
-  let text = UText.toText utext
-      bytes = BS.unpack (Text.Encoding.encodeUtf8 text)
-      byteLen = fromIntegral (length bytes) :: Word32
-   in [ Comment $ "Text literal: " ++ show (take 20 (Text.unpack text)) ++ if Text.length text > 20 then "..." else ""
-      , -- Allocate text object
-        I32Const byteLen
-      , Call "__alloc_text"
-      , LocalSet "__text_temp"
-      ]
-        ++ concatMap (storeByteAt (fromIntegral ABI.textDataOffset)) (zip [0 ..] bytes)
-        ++
-        -- Return pointer as i64
-        [ LocalGet "__text_temp"
-        , I64ExtendI32U
-        ]
-  where
-    storeByteAt :: Word32 -> (Int, Word8) -> [WatInstr]
-    storeByteAt baseOffset (idx, byte) =
-      [ LocalGet "__text_temp"
-      , I32Const (fromIntegral byte)
-      , I32Store8 (baseOffset + fromIntegral idx)
-      ]
+compileLit lit = case Literal.compileLit lit of
+  Left (Literal.UnsupportedLiteral msg) -> Left $ UnsupportedConstruct (Text.pack msg)
+  Right instrs -> Right instrs
 
 --------------------------------------------------------------------------------
--- Primitive Operation Compilation
+-- Primitive Operation Compilation (delegated to Compile.Builtins)
 --------------------------------------------------------------------------------
 
 -- | Compile a primitive operation to a WASM instruction
 compilePrimOp :: POp -> Int -> CompileResult WatInstr
--- Nat operations
-compilePrimOp ADDN 2 = pure I64Add
-compilePrimOp SUBN 2 = pure I64Sub
-compilePrimOp MULN 2 = pure I64Mul
-compilePrimOp DIVN 2 = pure I64DivU
-compilePrimOp MODN 2 = pure I64RemU
-compilePrimOp INCN 1 = pure I64Add -- Caller pushes 1; we just emit add
-compilePrimOp DECN 1 = pure I64Sub -- Caller pushes 1; we just emit sub
-compilePrimOp LEQN 2 = pure I64LeU
-compilePrimOp LESN 2 = pure I64LtU
-compilePrimOp EQLN 2 = pure I64Eq
-compilePrimOp NEQN 2 = pure I64Ne
--- Int operations
-compilePrimOp ADDI 2 = pure I64Add
-compilePrimOp SUBI 2 = pure I64Sub
-compilePrimOp MULI 2 = pure I64Mul
-compilePrimOp DIVI 2 = pure I64DivS
-compilePrimOp MODI 2 = pure I64RemS
-compilePrimOp LEQI 2 = pure I64LeS
-compilePrimOp LESI 2 = pure I64LtS
-compilePrimOp EQLI 2 = pure I64Eq
-compilePrimOp NEQI 2 = pure I64Ne
-compilePrimOp NEGI 1 = pure I64Sub -- Caller pushes 0; we emit sub for (0 - x)
--- Float operations
-compilePrimOp ADDF 2 = pure F64Add
-compilePrimOp SUBF 2 = pure F64Sub
-compilePrimOp MULF 2 = pure F64Mul
-compilePrimOp DIVF 2 = pure F64Div
-compilePrimOp LEQF 2 = pure F64Le
-compilePrimOp LESF 2 = pure F64Lt
-compilePrimOp EQLF 2 = pure F64Eq
--- Debug operations (FFI calls)
-compilePrimOp TRCE 2 = pure $ Call "Debug_trace"  -- (Text, a) -> ()
-compilePrimOp PRNT 1 = pure $ Call "Debug_watch"  -- Text -> Text
--- Unsupported operations
-compilePrimOp op _n = Left $ UnsupportedPrimOp op
-
---------------------------------------------------------------------------------
--- Builtin Reference Mapping
---------------------------------------------------------------------------------
+compilePrimOp op n = case Builtins.compilePrimOp op n of
+  Left (Builtins.UnsupportedPrimOp p) -> Left $ UnsupportedPrimOp p
+  Right instr -> Right instr
 
 -- | Map builtin reference names to WASM instructions
--- This handles the case where parsed Unison code calls builtins via FComb
--- rather than using TPrm directly.
---
--- Note: Comparison ops return i32 in WASM, so we extend to i64.
--- Float ops produce f64, so we reinterpret to i64 for the return value.
 builtinToPrimOp :: Text -> Int -> Maybe [WatInstr]
--- Nat operations (the ## prefix is stripped by the parser)
-builtinToPrimOp "Nat.+" 2 = Just [I64Add]
-builtinToPrimOp "Nat.-" 2 = Just [I64Sub]  -- Also handle Nat.- alias
-builtinToPrimOp "Nat.sub" 2 = Just [I64Sub]
-builtinToPrimOp "Nat.drop" 2 = Just [I64Sub]  -- Saturating sub (TODO: should clamp to 0)
-builtinToPrimOp "Nat.*" 2 = Just [I64Mul]
-builtinToPrimOp "Nat./" 2 = Just [I64DivU]
-builtinToPrimOp "Nat.mod" 2 = Just [I64RemU]
-builtinToPrimOp "Nat.<=" 2 = Just [I64LeU, I64ExtendI32U]  -- Comparison returns i32, extend to i64
-builtinToPrimOp "Nat.<" 2 = Just [I64LtU, I64ExtendI32U]
-builtinToPrimOp "Nat.>=" 2 = Just [I64GeU, I64ExtendI32U]
-builtinToPrimOp "Nat.>" 2 = Just [I64GtU, I64ExtendI32U]
-builtinToPrimOp "Nat.==" 2 = Just [I64Eq, I64ExtendI32U]
-builtinToPrimOp "Universal.==" 2 = Just [I64Eq, I64ExtendI32U]
--- Int operations
-builtinToPrimOp "Int.+" 2 = Just [I64Add]
-builtinToPrimOp "Int.-" 2 = Just [I64Sub]
-builtinToPrimOp "Int.*" 2 = Just [I64Mul]
-builtinToPrimOp "Int./" 2 = Just [I64DivS]
-builtinToPrimOp "Int.mod" 2 = Just [I64RemS]
-builtinToPrimOp "Int.<=" 2 = Just [I64LeS, I64ExtendI32U]
-builtinToPrimOp "Int.<" 2 = Just [I64LtS, I64ExtendI32U]
-builtinToPrimOp "Int.==" 2 = Just [I64Eq, I64ExtendI32U]
--- Float operations
--- Operands are stored as i64 (reinterpreted), so we convert back to f64, do the op, then convert result to i64
--- Stack before: [i64_a, i64_b]
--- We need: f64.reinterpret_i64 on each operand before the float op
--- But we can't insert between operands with this approach, so we use a different strategy:
--- The caller (compileANormal for FComb) handles pushing operands as i64.
--- Float ops need to convert both operands. We handle this by emitting extra instructions.
-builtinToPrimOp "Float.+" 2 = Just $ floatBinOp F64Add
-builtinToPrimOp "Float.-" 2 = Just $ floatBinOp F64Sub
-builtinToPrimOp "Float.*" 2 = Just $ floatBinOp F64Mul
-builtinToPrimOp "Float./" 2 = Just $ floatBinOp F64Div
-builtinToPrimOp "Float.<=" 2 = Just $ floatCmpOp F64Le
-builtinToPrimOp "Float.<" 2 = Just $ floatCmpOp F64Lt
-builtinToPrimOp "Float.==" 2 = Just $ floatCmpOp F64Eq
--- Debug operations (FFI calls)
-builtinToPrimOp "Debug.trace" 2 = Just [Call "Debug_trace"]
-builtinToPrimOp "Debug.watch" 2 = Just [Call "Debug_watch"]
--- Unknown builtin
-builtinToPrimOp _ _ = Nothing
-
--- | Generate instructions for a float binary operation.
--- Stack before: [i64_a, i64_b]  (floats stored as reinterpreted i64)
--- We need to convert both to f64, do the op, then convert result back to i64.
--- Uses a temp local to handle the stack manipulation.
-floatBinOp :: WatInstr -> [WatInstr]
-floatBinOp op =
-  [ -- Stack: [i64_a, i64_b]
-    -- Save b to temp, convert a, reload b as f64
-    LocalSet "__float_temp"    -- Stack: [i64_a], temp = i64_b
-  , F64ReinterpretI64          -- Stack: [f64_a]
-  , LocalGet "__float_temp"    -- Stack: [f64_a, i64_b]
-  , F64ReinterpretI64          -- Stack: [f64_a, f64_b]
-  , op                         -- Stack: [f64_result]
-  , I64ReinterpretF64          -- Stack: [i64_result]
-  ]
-
--- | Generate instructions for a float comparison operation.
--- Same as floatBinOp but result is i32 (extended to i64).
-floatCmpOp :: WatInstr -> [WatInstr]
-floatCmpOp op =
-  [ LocalSet "__float_temp"
-  , F64ReinterpretI64
-  , LocalGet "__float_temp"
-  , F64ReinterpretI64
-  , op                         -- Stack: [i32_result]
-  , I64ExtendI32U              -- Stack: [i64_result]
-  ]
+builtinToPrimOp = Builtins.builtinToPrimOp
 
 --------------------------------------------------------------------------------
--- Foreign Function Imports
+-- Foreign Function Imports (delegated to Compile.FFI)
 --------------------------------------------------------------------------------
 
 -- | Convert a ForeignFunc to a WASM import function name.
--- Dots and special chars are replaced with underscores to be WASM-compatible.
 foreignFuncToImportName :: ForeignFunc -> String
-foreignFuncToImportName ff =
-  Text.unpack $ Text.map sanitize (foreignFuncBuiltinName ff)
-  where
-    sanitize '.' = '_'
-    sanitize c = c
+foreignFuncToImportName = FFI.foreignFuncToImportName
+
+-- | Look up a builtin name and return the ForeignFunc if it exists.
+builtinNameToForeignFunc :: Text -> Maybe ForeignFunc
+builtinNameToForeignFunc = FFI.builtinNameToForeignFunc
 
 -- | Collect all foreign function calls from an ANormal term.
--- Returns a list of unique ForeignFuncs encountered.
 collectForeignCalls :: (Var v) => ANormal Reference v -> [ForeignFunc]
-collectForeignCalls = nub . go
-  where
-    go (TFOp ff _) = [ff]
-    go (TLets _ _ _ binding body) = go binding ++ go body
-    go (TMatch _ branches) = goBranches branches
-    go (THnd _ _ _ body) = go body
-    go (TShift _ _ body) = go body
-    go (TKon _ _) = []  -- TKon just calls a continuation, no nested terms
-    go (ABTN.Term _ (ABTN.Abs _ inner)) = go inner  -- Unwrap TAbs
-    go _ = []
-
-    goBranches (MatchIntegral cases def) =
-      concatMap go (map snd $ EC.mapToList cases) ++ maybe [] go def
-    goBranches (MatchNumeric _ cases def) =
-      concatMap go (map snd $ EC.mapToList cases) ++ maybe [] go def
-    goBranches (MatchData _ cases def) =
-      -- MatchData has ref, EnumMap CTag ([Mem], e), Maybe e
-      concatMap (\(_, (_, body)) -> go body) (EC.mapToList cases)
-        ++ maybe [] go def
-    goBranches (MatchEmpty) = []
-    goBranches (MatchRequest _ _) = []  -- Request handlers are complex, skip for now
-    goBranches (MatchText cases def) =
-      concatMap go (Map.elems cases) ++ maybe [] go def
-    goBranches (MatchSum cases) =
-      -- MatchSum has EnumMap Word64 ([Mem], e)
-      concatMap (\(_, (_, body)) -> go body) (EC.mapToList cases)
-
-    nub = map head . groupBy (==) . sort
-
--- | Generate WatImport declarations for a list of foreign functions.
--- Each foreign function becomes: (import "unison" "funcName" (func $funcName ...))
-foreignFuncsToImports :: [ForeignFunc] -> [WatImport]
-foreignFuncsToImports = map toImport
-  where
-    toImport ff =
-      let name = foreignFuncToImportName ff
-          -- For now, assume all foreign funcs take i64 args and return i64
-          -- TODO: Look up actual signature from ForeignFunc enum
-          (params, results) = foreignFuncSignature ff
-       in WatImport
-            { importModule = "unison",
-              importName = name,
-              importKind = ImportFunc name params results
-            }
-
--- | Get the WASM type signature for a foreign function.
--- For MVP, we use a simplified signature: all args as i64, returns i64.
--- A more complete implementation would look up the actual Unison type signature.
-foreignFuncSignature :: ForeignFunc -> ([WatValType], [WatValType])
-foreignFuncSignature _ff = ([I64], [I64])  -- Simplified: 1 arg, 1 result
+collectForeignCalls = FFI.collectForeignCalls
 
 -- | Collect foreign calls from a main SuperGroup and its lifted combinators.
 collectForeignCallsFromGroups ::
@@ -2183,66 +1689,11 @@ collectForeignCallsFromGroups ::
   SuperGroup Reference v ->
   [(Reference, SuperGroup Reference v)] ->
   [ForeignFunc]
-collectForeignCallsFromGroups mainGroup liftedGroups =
-  let mainCalls = collectForeignCallsFromSuperGroup mainGroup
-      liftedCalls = concatMap (collectForeignCallsFromSuperGroup . snd) liftedGroups
-      allCalls = mainCalls ++ liftedCalls
-   in nub allCalls
-  where
-    nub = map head . groupBy (==) . sort
+collectForeignCallsFromGroups = FFI.collectForeignCallsFromGroups
 
--- | Collect foreign calls from a SuperGroup.
-collectForeignCallsFromSuperGroup :: (Var v) => SuperGroup Reference v -> [ForeignFunc]
-collectForeignCallsFromSuperGroup (Rec localDefs entry) =
-  let entryCalls = collectForeignCallsFromSuperNormal entry
-      localCalls = concatMap (collectForeignCallsFromSuperNormal . snd) localDefs
-   in entryCalls ++ localCalls
-
--- | Debug builtins that need FFI imports
-debugBuiltinNames :: [Text]
-debugBuiltinNames = ["Debug.trace", "Debug.watch"]
-
--- | Collect debug primitives/builtins that need FFI imports.
--- Collects both TPrm (TRCE, PRNT) and TApp (FComb (Builtin "Debug.trace")) calls.
-collectDebugBuiltins :: (Var v) => ANormal Reference v -> [Text]
-collectDebugBuiltins = nub . go
-  where
-    go (TPrm TRCE _) = ["Debug.trace"]
-    go (TPrm PRNT _) = ["Debug.watch"]
-    go (TApp (FComb (Reference.Builtin name)) _)
-      | name `elem` debugBuiltinNames = [name]
-    go (TLets _ _ _ binding body) = go binding ++ go body
-    go (TMatch _ branches) = goBranches branches
-    go (THnd _ _ _ body) = go body
-    go (TShift _ _ body) = go body
-    go (ABTN.Term _ (ABTN.Abs _ inner)) = go inner
-    go _ = []
-
-    goBranches (MatchIntegral cases def) =
-      concatMap go (map snd $ EC.mapToList cases) ++ maybe [] go def
-    goBranches (MatchNumeric _ cases def) =
-      concatMap go (map snd $ EC.mapToList cases) ++ maybe [] go def
-    goBranches (MatchData _ cases def) =
-      concatMap (\(_, (_, body)) -> go body) (EC.mapToList cases) ++ maybe [] go def
-    goBranches MatchEmpty = []
-    goBranches (MatchRequest _ _) = []
-    goBranches (MatchText cases def) =
-      concatMap go (Map.elems cases) ++ maybe [] go def
-    goBranches (MatchSum cases) =
-      concatMap (\(_, (_, body)) -> go body) (EC.mapToList cases)
-
-    nub = map head . groupBy (==) . sort
-
--- | Collect debug builtins from a SuperGroup.
-collectDebugBuiltinsFromSuperGroup :: (Var v) => SuperGroup Reference v -> [Text]
-collectDebugBuiltinsFromSuperGroup (Rec localDefs entry) =
-  let entryCalls = collectDebugBuiltinsFromSuperNormal entry
-      localCalls = concatMap (collectDebugBuiltinsFromSuperNormal . snd) localDefs
-   in entryCalls ++ localCalls
-
--- | Collect debug builtins from a SuperNormal.
-collectDebugBuiltinsFromSuperNormal :: (Var v) => SuperNormal Reference v -> [Text]
-collectDebugBuiltinsFromSuperNormal (Lambda _ body) = collectDebugBuiltins body
+-- | Generate WatImport declarations for a list of foreign functions.
+foreignFuncsToImports :: [ForeignFunc] -> [WatImport]
+foreignFuncsToImports = FFI.foreignFuncsToImports
 
 -- | Collect debug builtins from all groups.
 collectDebugBuiltinsFromGroups ::
@@ -2250,32 +1701,11 @@ collectDebugBuiltinsFromGroups ::
   SuperGroup Reference v ->
   [(Reference, SuperGroup Reference v)] ->
   [Text]
-collectDebugBuiltinsFromGroups mainGroup liftedGroups =
-  let mainCalls = collectDebugBuiltinsFromSuperGroup mainGroup
-      liftedCalls = concatMap (collectDebugBuiltinsFromSuperGroup . snd) liftedGroups
-   in nub (mainCalls ++ liftedCalls)
-  where
-    nub = map head . groupBy (==) . sort
+collectDebugBuiltinsFromGroups = FFI.collectDebugBuiltinsFromGroups
 
 -- | Generate imports for debug builtins.
 debugBuiltinsToImports :: [Text] -> [WatImport]
-debugBuiltinsToImports = map toImport
-  where
-    toImport "Debug.trace" = WatImport
-      { importModule = "ffi"
-      , importName = "Debug_trace"
-      , importKind = ImportFunc "Debug_trace" [I64, I64] [I64]  -- (text, val) -> unit
-      }
-    toImport "Debug.watch" = WatImport
-      { importModule = "ffi"
-      , importName = "Debug_watch"
-      , importKind = ImportFunc "Debug_watch" [I64] [I64]  -- text -> text
-      }
-    toImport name = error $ "debugBuiltinsToImports: unexpected builtin: " ++ Text.unpack name
-
--- | Collect foreign calls from a SuperNormal.
-collectForeignCallsFromSuperNormal :: (Var v) => SuperNormal Reference v -> [ForeignFunc]
-collectForeignCallsFromSuperNormal (Lambda _ body) = collectForeignCalls body
+debugBuiltinsToImports = FFI.debugBuiltinsToImports
 
 --------------------------------------------------------------------------------
 -- Locals Save/Restore for Continuations

@@ -4,14 +4,21 @@
  * This Node.js server uses the SAME WASM module as the browser.
  * Both environments execute identical Unison code, eliminating drift.
  *
+ * Uses UnisonRuntime from @unison/wasm-runtime for:
+ * - Proper FFI handling (Debug.trace, etc.)
+ * - Async foreign function support (IO.delay, etc.)
+ * - Memory management
+ *
  * Usage:
  *   npm run server
  */
 
 import express from 'express';
-import { readFileSync, existsSync } from 'fs';
+import { existsSync } from 'fs';
+import { readFile } from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { UnisonRuntime } from '@unison/wasm-runtime';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -19,18 +26,10 @@ const __dirname = dirname(__filename);
 const app = express();
 const PORT = parseInt(process.env.PORT || '3001');
 
-// WASM module interface - all pricing functions compiled from Unison
-interface WasmExports {
-  calculatePrice: (qty: bigint) => bigint;
-  calculateDiscount: (qty: bigint) => bigint;
-  calculateSubtotal: (qty: bigint) => bigint;
-  calculatePriceWithLog: (qty: bigint) => bigint;
-}
-
-let wasmExports: WasmExports | null = null;
+let runtime: UnisonRuntime | null = null;
 
 /**
- * Load the WASM module
+ * Load the WASM module using UnisonRuntime
  */
 async function loadWasm(): Promise<void> {
   // __dirname is 'dist/' after compilation, so pricing.wasm is in same dir
@@ -42,43 +41,40 @@ async function loadWasm(): Promise<void> {
     process.exit(1);
   }
 
-  const wasmBytes = readFileSync(wasmPath);
+  const wasmBytes = await readFile(wasmPath);
 
-  // FFI handlers for Debug.trace and Debug.watch
-  let memory: WebAssembly.Memory;
+  // Create UnisonRuntime instance
+  runtime = new UnisonRuntime();
 
-  const readText = (ptr: bigint): string => {
-    try {
-      const view = new DataView(memory.buffer);
-      const ptrNum = Number(ptr);
-      const byteLen = view.getUint32(ptrNum + 8, true);  // TEXT_BYTELEN_OFFSET
-      const bytes = new Uint8Array(memory.buffer, ptrNum + 16, byteLen);  // TEXT_BYTES_OFFSET
-      return new TextDecoder().decode(bytes);
-    } catch {
-      return `<ptr:${ptr}>`;
-    }
-  };
+  // Register sync FFI handlers for Debug.trace/watch
+  // These override the defaults to use console.log directly
+  runtime.registerForeign('Debug_trace', (rt, textPtr: bigint, _valPtr: bigint): bigint => {
+    const text = rt.getText(Number(textPtr));
+    console.log(`[trace] ${text}`);
+    return 0n; // Unit
+  });
 
-  const imports: WebAssembly.Imports = {
-    ffi: {
-      // Debug.trace : Text -> a -> ()
-      Debug_trace: (textPtr: bigint, _valPtr: bigint): bigint => {
-        console.log(`[trace] ${readText(textPtr)}`);
-        return 0n;
-      },
-      // Debug.watch : Text -> a -> a
-      Debug_watch: (textPtr: bigint): bigint => {
-        console.log(`[watch] ${readText(textPtr)}`);
-        return textPtr;
-      },
-    },
-  };
+  runtime.registerForeign('Debug_watch', (rt, textPtr: bigint): bigint => {
+    const text = rt.getText(Number(textPtr));
+    console.log(`[watch] ${text}`);
+    return textPtr;
+  });
 
-  const module = await WebAssembly.instantiate(wasmBytes, imports);
-  memory = module.instance.exports.memory as WebAssembly.Memory;
-  wasmExports = module.instance.exports as unknown as WasmExports;
+  // IO.delay.impl.v3 - ASYNC handler that actually delays
+  runtime.registerAsyncForeign('IO.delay.impl.v3', async (_rt, microseconds: bigint): Promise<bigint> => {
+    const ms = Number(microseconds) / 1000;
+    console.log(`[IO.delay] waiting ${ms}ms...`);
+    await new Promise(resolve => setTimeout(resolve, ms));
+    console.log(`[IO.delay] done`);
+    return 0n; // Unit (Either Right ())
+  });
+
+  // Load the WASM module
+  await runtime.loadWasm(wasmBytes);
+
   console.log('✅ WASM module loaded from', wasmPath);
 }
+
 
 /**
  * Format cents as dollars
@@ -99,16 +95,16 @@ app.use('/dist', express.static(__dirname));
 app.get('/api/price', (req, res) => {
   const qty = parseInt(req.query.qty as string) || 1;
 
-  if (!wasmExports) {
+  if (!runtime) {
     res.status(500).json({ error: 'WASM not loaded' });
     return;
   }
 
   // Call all pricing functions from WASM - compiled from Unison
-  const subtotal = Number(wasmExports.calculateSubtotal(BigInt(qty)));
-  const discount = Number(wasmExports.calculateDiscount(BigInt(qty)));
-  // Use calculatePriceWithLog to demonstrate FFI (Debug.trace)
-  const price = Number(wasmExports.calculatePriceWithLog(BigInt(qty)));
+  const subtotal = Number(runtime.call('calculateSubtotal', BigInt(qty)));
+  const discount = Number(runtime.call('calculateDiscount', BigInt(qty)));
+  // Use calculatePriceWithLog to demonstrate sync FFI (Debug.trace)
+  const price = Number(runtime.call('calculatePriceWithLog', BigInt(qty)));
 
   res.json({
     quantity: qty,
@@ -123,6 +119,41 @@ app.get('/api/price', (req, res) => {
     source: 'unison-wasm',
     note: 'Computed by the SAME Unison code as the browser! Check server logs for Debug.trace output.'
   });
+});
+
+// API endpoint for ASYNC price calculation (demonstrates IO.delay)
+app.get('/api/price-async', async (req, res) => {
+  const qty = parseInt(req.query.qty as string) || 1;
+  const delayMs = parseInt(req.query.delay as string) || 500;
+
+  if (!runtime) {
+    res.status(500).json({ error: 'WASM not loaded' });
+    return;
+  }
+
+  try {
+    const delayMicros = BigInt(delayMs * 1000);  // ms → microseconds
+    console.log(`[API] Starting async price calculation with ${delayMs}ms delay...`);
+
+    // Use runtime.run() for async - handles yield/resume
+    const price = await runtime.run('calculatePriceWithDelay', delayMicros, BigInt(qty));
+
+    console.log(`[API] Async calculation complete, price: ${price}`);
+
+    res.json({
+      quantity: qty,
+      delay: delayMs,
+      price: Number(price),
+      formatted: {
+        price: formatCents(Number(price)),
+      },
+      source: 'unison-wasm-async',
+      note: `Used IO.delay (${delayMs}ms) with real async yield/resume!`
+    });
+  } catch (error) {
+    console.error('[API] Async error:', error);
+    res.status(500).json({ error: String(error) });
+  }
 });
 
 // "Drift" endpoint - simulates what happens with duplicated code
@@ -155,7 +186,7 @@ app.get('/api/price-drift', (req, res) => {
 app.get('/api/health', (_, res) => {
   res.json({
     status: 'ok',
-    wasmLoaded: wasmExports !== null,
+    wasmLoaded: runtime !== null,
     timestamp: new Date().toISOString()
   });
 });
@@ -173,9 +204,10 @@ async function main() {
     console.log('   Using the SAME WASM module as the browser!');
     console.log('');
     console.log('   API Endpoints:');
-    console.log(`   GET /api/price?qty=5       → Uses WASM (same as browser)`);
-    console.log(`   GET /api/price-drift?qty=5 → Uses JS (simulates drift)`);
-    console.log(`   GET /api/health            → Health check`);
+    console.log(`   GET /api/price?qty=5             → Sync WASM (Debug.trace)`);
+    console.log(`   GET /api/price-async?qty=5       → Async WASM (IO.delay)`);
+    console.log(`   GET /api/price-drift?qty=5       → JS (simulates drift)`);
+    console.log(`   GET /api/health                  → Health check`);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   });
 }
