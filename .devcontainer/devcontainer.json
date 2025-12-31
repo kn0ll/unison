@@ -16,7 +16,14 @@
       ],
       "settings": {
         "haskell.manageHLS": "GHCup",
-        "terminal.integrated.defaultProfile.linux": "bash"
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "files.exclude": {
+          "unison-wasm/demo/.unison": true,
+          "unison-wasm/demo/dist": true,
+          "unison-wasm/demo/node_modules": true,
+          "unison-wasm/demo/.unisonHistory": true,
+          "unison-wasm/demo/setup-codebase.output.md": true
+        }
       }
     }
   },

@@ -45,17 +45,17 @@ LANG=C.UTF-8 LC_ALL=C.UTF-8 stack exec unison-wasm-poc -- \
     --codebase "$CODEBASE_DIR" \
     --project demo \
     --branch main \
-    calculatePrice > "$DIST_DIR/pricing.wat" || {
+    calculatePrice > "$DIST_DIR/bundle.wat" || {
   echo "Error: Compilation failed"
   exit 1
 }
-echo "  ✓ Compiled calculatePrice to $DIST_DIR/pricing.wat"
+echo "  ✓ Compiled calculatePrice to $DIST_DIR/bundle.wat"
 
 # Convert WAT to WASM binary (if wat2wasm available)
 if command -v wat2wasm &>/dev/null; then
   echo "  Converting to WASM binary..."
-  wat2wasm "$DIST_DIR/pricing.wat" -o "$DIST_DIR/pricing.wasm"
-  echo "  ✓ Created $DIST_DIR/pricing.wasm"
+  wat2wasm "$DIST_DIR/bundle.wat" -o "$DIST_DIR/bundle.wasm"
+  echo "  ✓ Created $DIST_DIR/bundle.wasm"
 else
   echo "  Note: wat2wasm not found, skipping binary conversion"
   echo "        Install wabt for binary output: brew install wabt (macOS)"

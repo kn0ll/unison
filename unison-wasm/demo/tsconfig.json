@@ -1,11 +1,11 @@
 {
+  "include": ["index.ts"],
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "node",
     "lib": ["ES2022", "DOM"],
     "outDir": "./dist",
-    "rootDir": ".",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -14,14 +14,6 @@
     "declarationMap": true,
     "sourceMap": true,
     "resolveJsonModule": true
-  },
-  "include": [
-    "demo.ts",
-    "server.ts"
-  ],
-  "exclude": [
-    "node_modules",
-    "dist"
-  ]
+  }
 }
 
