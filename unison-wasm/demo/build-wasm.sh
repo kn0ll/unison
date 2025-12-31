@@ -27,15 +27,6 @@ LANG=C.UTF-8 LC_ALL=C.UTF-8 stack build unison-wasm:exe:unison-wasm-poc --fast 2
   exit 1
 }
 
-# Always recreate codebase to pick up pricing.u changes
-echo "  Creating demo codebase..."
-cd "$SCRIPT_DIR"
-rm -rf "$CODEBASE_DIR" setup-codebase.output.md
-unison transcript --save-codebase-to "$CODEBASE_DIR" setup-codebase.md >/dev/null 2>&1 || {
-  echo "Error: Could not create codebase"
-  exit 1
-}
-
 cd "$WASM_DIR"
 
 # Compile calculatePrice from codebase

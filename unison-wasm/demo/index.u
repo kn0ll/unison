@@ -96,12 +96,12 @@ server.main = do
   printLine ""
   printLine "Endpoints:"
   printLine "  GET /api/price?qty=5&delay=500"
-  printLine "  GET /* (static files from ./public)"
+  printLine "  GET /* (static files from .)"
   printLine ""
   printLine "This uses the SAME calculatePrice function as the browser WASM!"
   printLine ""
   config = server.Config.default |> server.Config.port.set (Port "8080")
-  staticRoot = FilePath "./public"
+  staticRoot = FilePath "."
   routes = Routes.default <<< priceHandler <<< staticHandler staticRoot
   Random.run do
     Threads.run do
