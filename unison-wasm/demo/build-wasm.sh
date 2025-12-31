@@ -61,7 +61,19 @@ else
   echo "        Install wabt for binary output: brew install wabt (macOS)"
 fi
 
+# Generate TypeScript type definitions
+echo "  Generating TypeScript types..."
+LANG=C.UTF-8 LC_ALL=C.UTF-8 stack exec unison-wasm-poc -- \
+    generate-types \
+    'calculatePrice:bigint,bigint->[bigint,bigint,bigint]' \
+    > "$DIST_DIR/pricing.d.ts" || {
+  echo "Error: Type generation failed"
+  exit 1
+}
+echo "  ✓ Created $DIST_DIR/pricing.d.ts"
+
 echo ""
 echo "Build complete!"
-echo "  WAT: $DIST_DIR/pricing.wat"
-[ -f "$DIST_DIR/pricing.wasm" ] && echo "  WASM: $DIST_DIR/pricing.wasm"
+echo "  WAT:   $DIST_DIR/pricing.wat"
+echo "  Types: $DIST_DIR/pricing.d.ts"
+[ -f "$DIST_DIR/pricing.wasm" ] && echo "  WASM:  $DIST_DIR/pricing.wasm"

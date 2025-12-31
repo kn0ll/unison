@@ -24,4 +24,5 @@ export {
 export * from './wasm-alloc.js';
 export * from './wasm-debug.js';
 export * from './runtime.js';
+export type { FunctionSignatures } from './runtime.js';
 export * from './ffi.js';

@@ -46,6 +46,23 @@ import {
 // =============================================================================
 
 /**
+ * Base interface for function signatures.
+ * Generated .d.ts files extend this interface via module augmentation.
+ *
+ * @example
+ * // In generated pricing.d.ts:
+ * declare module '@unison/wasm-runtime' {
+ *   interface FunctionSignatures {
+ *     'calculatePrice': (delay: bigint, qty: bigint) => [bigint, bigint, bigint];
+ *   }
+ * }
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-interface
+export interface FunctionSignatures {
+  // Extended by generated code
+}
+
+/**
  * WASM imports provided to the module.
  */
 export interface UnisonImports {
@@ -399,7 +416,7 @@ export class UnisonRuntime {
   // ===========================================================================
 
   /**
-   * Run a function that may perform async operations.
+   * Run a function that may perform async operations (typed).
    *
    * Returns a Promise that resolves when the computation completes,
    * which may involve multiple yield/resume cycles for async IO.
@@ -408,7 +425,17 @@ export class UnisonRuntime {
    * @param args - Arguments to pass to the function
    * @returns Promise resolving to the final result
    */
-  async run(funcName: string, ...args: any[]): Promise<bigint> {
+  async run<K extends keyof FunctionSignatures>(
+    funcName: K,
+    ...args: FunctionSignatures[K] extends (...args: infer A) => any ? A : never[]
+  ): Promise<FunctionSignatures[K] extends (...args: any[]) => infer R ? R : bigint>;
+
+  /**
+   * Run a function (untyped fallback for functions not in FunctionSignatures).
+   */
+  async run(funcName: string, ...args: any[]): Promise<bigint>;
+
+  async run(funcName: string, ...args: any[]): Promise<any> {
     // Check for nested async (MVP constraint)
     if (this.asyncState !== AsyncState.Idle) {
       throw new NestedAsyncError();

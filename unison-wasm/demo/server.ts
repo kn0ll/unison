@@ -8,6 +8,8 @@
  *   npm run server
  */
 
+/// <reference path="./dist/pricing.d.ts" />
+
 import express from 'express';
 import { existsSync } from 'fs';
 import { readFile } from 'fs/promises';
@@ -22,26 +24,6 @@ const app = express();
 const PORT = parseInt(process.env.PORT || '3001');
 
 let runtime: UnisonRuntime | null = null;
-
-// PriceResult from Unison: { subtotal: Nat, discount: Nat, total: Nat }
-interface PriceResult {
-  subtotal: number;
-  discount: number;
-  total: number;
-}
-
-/**
- * Parse a PriceResult from WASM heap pointer.
- */
-function parsePriceResult(ptr: bigint): PriceResult {
-  if (!runtime) throw new Error('Runtime not loaded');
-  const fields = runtime.readDataGFields(Number(ptr));
-  return {
-    subtotal: Number(fields[0]),
-    discount: Number(fields[1]),
-    total: Number(fields[2]),
-  };
-}
 
 /**
  * Load the WASM module using UnisonRuntime
@@ -115,24 +97,21 @@ app.get('/api/price', async (req, res) => {
     const delayMicros = BigInt(delayMs * 1000);
     const startTime = Date.now();
 
-    // Call calculatePrice - returns PriceResult record
-    const resultPtr = await runtime.run('calculatePrice', delayMicros, BigInt(qty));
-
-    // Parse the PriceResult record from WASM heap
-    const result = parsePriceResult(resultPtr);
+    // Call calculatePrice - fully typed, returns [bigint, bigint, bigint]
+    const [subtotal, discount, total] = await runtime.run('calculatePrice', delayMicros, BigInt(qty));
     const elapsed = Date.now() - startTime;
 
     res.json({
       quantity: qty,
       delay: delayMs,
       elapsed,
-      subtotal: result.subtotal,
-      discount: result.discount,
-      total: result.total,
+      subtotal: Number(subtotal),
+      discount: Number(discount),
+      total: Number(total),
       formatted: {
-        subtotal: formatCents(result.subtotal),
-        discount: formatCents(result.discount),
-        total: formatCents(result.total),
+        subtotal: formatCents(Number(subtotal)),
+        discount: formatCents(Number(discount)),
+        total: formatCents(Number(total)),
       },
       source: 'unison-wasm'
     });

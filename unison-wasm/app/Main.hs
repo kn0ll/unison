@@ -32,7 +32,7 @@ import Unison.Term qualified as Unison.Term
 import Unison.Wasm.Codebase (compileFromCodebasePath, compileMultipleFromCodebasePath)
 import Unison.Wasm.Compile (compileGroupWithLifted)
 import Unison.Wasm.Emit (emitModule)
-import Unison.Wasm.TypeScript (TsType (..), generateDtsFromExports)
+import Unison.Wasm.TypeScript (TsType (..), generateDtsFromExports, generateModuleAugmentation)
 
 -- | Parsing environment with builtin names
 parsingEnv :: Parser.ParsingEnv Identity
@@ -137,6 +137,16 @@ main = do
           retTs = parseTypeArg retType
           dts = generateDtsFromExports name [(name, [argTs], retTs)]
       putStr dts
+    -- generate-types: Generate module augmentation for type-safe runtime.run()
+    -- Usage: generate-types <name>:<arg1>,<arg2>,...-><ret> [more functions...]
+    -- Example: generate-types "calculatePrice:bigint,bigint->[bigint,bigint,bigint]"
+    ("generate-types" : specs) -> do
+      case traverse parseFunctionSpec specs of
+        Left err -> do
+          hPutStrLn stderr $ "Error parsing function spec: " ++ err
+          exitFailure
+        Right parsed -> do
+          putStr $ generateModuleAugmentation parsed
     [] -> usage
     _ -> do
       hPutStrLn stderr $ "Unknown command: " ++ unwords args
@@ -166,7 +176,45 @@ parseTypeArg "Float" = TsNumber
 parseTypeArg "Text" = TsString
 parseTypeArg "Boolean" = TsBoolean
 parseTypeArg "Unit" = TsVoid
-parseTypeArg name = TsNamed name
+parseTypeArg "bigint" = TsBigInt  -- Allow TypeScript type names
+parseTypeArg "number" = TsNumber
+parseTypeArg "string" = TsString
+parseTypeArg "boolean" = TsBoolean
+parseTypeArg "void" = TsVoid
+parseTypeArg name
+  | "[" `isPrefixOf` name && "]" `isSuffixOf` name =
+      -- Tuple type like [bigint,bigint,bigint]
+      let inner = drop 1 (take (length name - 1) name)
+          parts = splitOn ',' inner
+      in TsTuple (map parseTypeArg parts)
+  | otherwise = TsNamed name
+  where
+    isPrefixOf prefix str = take (length prefix) str == prefix
+    isSuffixOf suffix str = drop (length str - length suffix) str == suffix
+    splitOn _ [] = []
+    splitOn c s = case break (== c) s of
+      (x, []) -> [x]
+      (x, _ : rest) -> x : splitOn c rest
+
+-- | Parse a function spec like "funcName:arg1,arg2->ret"
+parseFunctionSpec :: String -> Either String (String, [TsType], TsType)
+parseFunctionSpec spec =
+  case break (== ':') spec of
+    (_, []) -> Left $ "Missing ':' in spec: " ++ spec
+    (name, ':' : rest) ->
+      case break (== '-') rest of
+        (_, []) -> Left $ "Missing '->' in spec: " ++ spec
+        (argsPart, '-' : '>' : retPart) ->
+          let args = if null argsPart then [] else map parseTypeArg (splitOn ',' argsPart)
+              ret = parseTypeArg retPart
+          in Right (name, args, ret)
+        _ -> Left $ "Invalid '->' in spec: " ++ spec
+    _ -> Left $ "Invalid spec: " ++ spec
+  where
+    splitOn _ [] = []
+    splitOn c s = case break (== c) s of
+      (x, []) -> [x]
+      (x, _ : rest) -> x : splitOn c rest
 
 -- | Parse compile-codebase command arguments
 -- Returns: (codebasePath, projectName, branchName, termNames)
@@ -195,12 +243,14 @@ usage = do
   hPutStrLn stderr "                                      Compile term(s) from a .unison codebase"
   hPutStrLn stderr "  types <name>                        Generate TypeScript .d.ts (default: Nat -> Nat)"
   hPutStrLn stderr "  types <name> <arg> <ret>            Generate .d.ts with explicit types"
+  hPutStrLn stderr "  generate-types <spec> [spec ...]    Generate module augmentation for runtime.run()"
   hPutStrLn stderr "  debug <code>                        Show parsed SuperGroup structure"
   hPutStrLn stderr ""
-  hPutStrLn stderr "Supported types for 'types' command: Nat, Int, Float, Text, Boolean, Unit"
+  hPutStrLn stderr "Types: Nat, Int, Float, Text, Boolean, Unit, bigint, number, string, [type,type,...]"
   hPutStrLn stderr ""
   hPutStrLn stderr "Examples:"
   hPutStrLn stderr "  unison-wasm-poc compile increment 'x -> ##Nat.+ x 1'"
   hPutStrLn stderr "  unison-wasm-poc compile-codebase --codebase .unison --project demo --branch main calculateSubtotal"
   hPutStrLn stderr "  unison-wasm-poc types factorial"
   hPutStrLn stderr "  unison-wasm-poc types greet Text Text"
+  hPutStrLn stderr "  unison-wasm-poc generate-types 'calculatePrice:bigint,bigint->[bigint,bigint,bigint]'"
