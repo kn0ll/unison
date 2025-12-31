@@ -342,21 +342,21 @@ Each function with yield points needs a resume dispatcher at the top:
 
 ## Implementation Phases
 
-### Phase 1: Yield Point Infrastructure
+### Phase 1: Yield Point Infrastructure ✅ COMPLETE
 
 **Goal:** Compiler emits yield-checking code after FFI calls.
 
 **Tasks:**
-1. Add `YieldPointId` counter to `CompileCtx`
-2. Modify `compileANormal` for `TFOp` to emit yield check
-3. Add globals: `__async_resuming`, `__async_resume_label`
-4. Track which functions have yield points
+1. ✅ Add `YieldPointId` counter to `CompileCtx`
+2. ✅ Modify `compileANormal` for `TFOp` to emit yield check
+3. ✅ Add globals: `__async_resuming`, `__async_resume_label`, `__async_resume_value`
+4. ✅ Track which functions have yield points
 
 **Exit Criteria:**
-- [ ] WASM checks return value after FFI call
-- [ ] `YIELD_SENTINEL` causes `return YIELD_SENTINEL`
-- [ ] Sync FFI (`Debug.trace`) still works
-- [ ] Unit test: `test-yield-check.js` passes
+- [x] WASM checks return value after FFI call
+- [x] `YIELD_SENTINEL` causes `return YIELD_SENTINEL`
+- [x] Sync FFI (`Debug.trace`) still works
+- [x] Unit tests pass (315 Haskell + 117 JS)
 
 ---
 

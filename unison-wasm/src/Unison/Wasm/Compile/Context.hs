@@ -20,6 +20,10 @@ module Unison.Wasm.Compile.Context
     setBaseLocalCount,
     getSaveableLocalCount,
 
+    -- * Yield Point Management (Async FFI)
+    allocYieldPoint,
+    getYieldPointCount,
+
     -- * Type Conversion
     memToValType,
 
@@ -63,7 +67,11 @@ data CompileCtx v = CompileCtx
     -- This is set at the start of compiling a function and doesn't change
     ctxBaseLocalCount :: Int,
     -- | Current pending args count (for ability frames)
-    ctxPendingArgs :: Int
+    ctxPendingArgs :: Int,
+    -- | Next yield point ID (for async FFI resume dispatch)
+    ctxNextYieldPoint :: Int,
+    -- | Whether this function has any yield points (async FFI calls)
+    ctxHasYieldPoints :: Bool
   }
   deriving (Eq, Show)
 
@@ -81,7 +89,9 @@ emptyCtx =
       ctxRefArities = Map.empty,
       ctxRefTableIndices = Map.empty,
       ctxBaseLocalCount = 0,
-      ctxPendingArgs = 0
+      ctxPendingArgs = 0,
+      ctxNextYieldPoint = 0,
+      ctxHasYieldPoints = False
     }
 
 -- | Set the base local count after binding function parameters
@@ -93,6 +103,22 @@ setBaseLocalCount ctx = ctx {ctxBaseLocalCount = ctxNextLocal ctx}
 -- This is current local count minus base (params only, not saved)
 getSaveableLocalCount :: CompileCtx v -> Int
 getSaveableLocalCount ctx = ctxNextLocal ctx - ctxBaseLocalCount ctx
+
+-- | Allocate a new yield point ID and return (id, updated context)
+-- This marks the function as having yield points.
+allocYieldPoint :: CompileCtx v -> (Int, CompileCtx v)
+allocYieldPoint ctx =
+  let yieldId = ctxNextYieldPoint ctx
+   in ( yieldId,
+        ctx
+          { ctxNextYieldPoint = yieldId + 1,
+            ctxHasYieldPoints = True
+          }
+      )
+
+-- | Get the total number of yield points in the current function
+getYieldPointCount :: CompileCtx v -> Int
+getYieldPointCount = ctxNextYieldPoint
 
 -- | Look up a variable in the context
 lookupVar :: (Var v) => v -> CompileCtx v -> Maybe (Int, Mem)

@@ -386,6 +386,7 @@ compileSuperNormalWithRefCtx funcNames funcArities refNames refArities refTableI
         , ("__req_ptr", I32)        -- TReq: Request object pointer
         , ("__req_arg0", I64)       -- TReq: First arg temp
         , ("__handler_ptr", I32)    -- TReq: Handler pointer from denv
+        , ("__ffi_result", I64)     -- TFOp: FFI result for yield check
         ]
       funcLocals' = drop (length mems) (ctxLocals finalCtx) ++ helperLocals
       funcResults = [I64]
@@ -444,6 +445,7 @@ compileSuperNormalWithCtx funcNames _currentFunc (Lambda mems body) name = do
         , ("__req_ptr", I32)        -- TReq: Request object pointer
         , ("__req_arg0", I64)       -- TReq: First arg temp
         , ("__handler_ptr", I32)    -- TReq: Handler pointer from denv
+        , ("__ffi_result", I64)     -- TFOp: FFI result for yield check
         ]
       -- Locals are all variables bound after the parameters plus helpers
       funcLocals' = drop (length mems) (ctxLocals finalCtx) ++ helperLocals
@@ -573,9 +575,14 @@ compileANormal _ctx (TBLit lit) = do
 compileANormal ctx (TPrm op args) = do
   -- Compile arguments (push onto stack)
   argInstrs <- concat <$> mapM (compileANormal ctx . TVar) args
-  -- Emit primitive
-  opInstr <- compilePrimOp op (length args)
-  pure $ argInstrs ++ [opInstr]
+  -- Special case: Debug operations are FFI calls that need yield check
+  case op of
+    TRCE -> pure $ argInstrs ++ ffiCallWithYieldCheck "Debug_trace"
+    PRNT -> pure $ argInstrs ++ ffiCallWithYieldCheck "Debug_watch"
+    _ -> do
+      -- Regular primitive - emit single instruction
+      opInstr <- compilePrimOp op (length args)
+      pure $ argInstrs ++ [opInstr]
 
 -- Static function call (FComb) - handle builtins specially
 -- Also handles partial application when args.length < arity
@@ -586,19 +593,24 @@ compileANormal ctx (TApp (FComb ref) args) = do
   case ref of
     -- Builtin references: map to primitive operations or foreign functions
     Reference.Builtin name -> do
-      -- Try to map builtin to primitive op
-      case builtinToPrimOp name numArgs of
-        Just opInstrs -> pure $ argInstrs ++ opInstrs
-        Nothing ->
-          -- Check if it's a foreign function
-          case builtinNameToForeignFunc name of
-            Just ff -> do
-              -- Foreign function call - emit import call
-              let funcName = foreignFuncToImportName ff
-              pure $ argInstrs ++ [Call funcName]
+      -- Special case: Debug builtins are FFI calls that need yield check
+      case name of
+        "Debug.trace" -> pure $ argInstrs ++ ffiCallWithYieldCheck "Debug_trace"
+        "Debug.watch" -> pure $ argInstrs ++ ffiCallWithYieldCheck "Debug_watch"
+        _ ->
+          -- Try to map builtin to primitive op
+          case builtinToPrimOp name numArgs of
+            Just opInstrs -> pure $ argInstrs ++ opInstrs
             Nothing ->
-              -- Unknown builtin
-              Left $ UnsupportedConstruct $ "Unknown builtin: " <> name
+              -- Check if it's a foreign function
+              case builtinNameToForeignFunc name of
+                Just ff -> do
+                  -- Foreign function call - emit import call with yield check
+                  let funcName = foreignFuncToImportName ff
+                  pure $ argInstrs ++ ffiCallWithYieldCheck funcName
+                Nothing ->
+                  -- Unknown builtin
+                  Left $ UnsupportedConstruct $ "Unknown builtin: " <> name
     -- Derived reference: look up in refNames for lifted combinators
     Reference.DerivedId _ -> do
       case Map.lookup ref (ctxRefNames ctx) of
@@ -1316,16 +1328,48 @@ compileANormal ctx (TKon contVar args) = do
       ]
 
 -- Foreign function call: calls an imported JS function
+-- After the call, we check if the result is YIELD_SENTINEL.
+-- If so, we propagate the yield by returning YIELD_SENTINEL.
+-- This enables async FFI: JavaScript returns YIELD_SENTINEL immediately,
+-- and later calls __resume to continue the computation.
 compileANormal ctx (TFOp foreignFunc args) = do
   -- Compile arguments (push onto stack as i64)
   argInstrs <- concat <$> mapM (compileANormal ctx . TVar) args
   -- Call the imported function using its sanitized name
   let funcName = foreignFuncToImportName foreignFunc
-  pure $ argInstrs ++ [Call funcName]
+  pure $ argInstrs ++ ffiCallWithYieldCheck funcName
 
 -- Fallback for unsupported constructs
 compileANormal _ctx _term = do
   Left $ UnsupportedConstruct "Unsupported ANormal construct"
+
+-- | Generate instructions for an FFI call with yield checking.
+--
+-- After calling the FFI function:
+-- 1. Check if result == YIELD_SENTINEL
+-- 2. If yes: return YIELD_SENTINEL to propagate yield up the call stack
+-- 3. If no: leave result on stack for caller
+--
+-- This pattern enables async FFI where JavaScript can return YIELD_SENTINEL
+-- to pause execution, then later call __resume to continue.
+ffiCallWithYieldCheck :: String -> [WatInstr]
+ffiCallWithYieldCheck funcName =
+  [ Call funcName,
+    -- Save result to local, keep on stack for comparison
+    LocalTee "__ffi_result",
+    -- Compare with YIELD_SENTINEL
+    I64Const ABI.yieldSentinel,
+    I64Eq,
+    -- If equal, propagate yield
+    IfVoid
+      [ Comment "FFI returned YIELD_SENTINEL - propagate yield",
+        I64Const ABI.yieldSentinel,
+        Return
+      ]
+      [],
+    -- Normal path: restore result to stack
+    LocalGet "__ffi_result"
+  ]
 
 --------------------------------------------------------------------------------
 -- PAp Helper Functions

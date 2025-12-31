@@ -4,7 +4,7 @@
  * Tests the ContinuationHandle, AsyncState, and async yield/resume cycle.
  */
 
-import { describe, it, beforeEach } from 'node:test';
+import { describe, it, beforeEach, before } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
@@ -226,6 +226,230 @@ describe('Async Foreign Function Registration', () => {
 
     assert.strictEqual(runtime.getAsyncForeign('test.func1'), handler1);
     assert.strictEqual(runtime.getAsyncForeign('test.func2'), handler2);
+  });
+});
+
+// =============================================================================
+// WASM Yield Check Tests (Phase 1)
+// =============================================================================
+// Tests that WASM functions check for YIELD_SENTINEL and propagate it.
+
+// wabt types
+interface WabtModule {
+  parseWat(filename: string, buffer: string): WabtWasmModule;
+}
+
+interface WabtWasmModule {
+  toBinary(options: Record<string, unknown>): { buffer: Uint8Array };
+  destroy(): void;
+}
+
+let wabtModule: WabtModule | null = null;
+
+/**
+ * Parse WAT text to WASM binary
+ */
+function watToBinary(wat: string): Uint8Array {
+  if (!wabtModule) {
+    throw new Error('wabt not initialized');
+  }
+  const module = wabtModule.parseWat('test.wat', wat);
+  const { buffer } = module.toBinary({});
+  module.destroy();
+  return buffer;
+}
+
+/**
+ * Compile WAT to WASM and instantiate with imports
+ */
+async function instantiateWatWithImports(
+  wat: string,
+  imports: WebAssembly.Imports
+): Promise<WebAssembly.Instance> {
+  const binary = watToBinary(wat);
+  const module = await WebAssembly.compile(binary as BufferSource);
+  return await WebAssembly.instantiate(module, imports);
+}
+
+// Helper to compare bigints as unsigned 64-bit values
+function asU64(n: bigint): bigint {
+  return BigInt.asUintN(64, n);
+}
+
+describe('WASM Yield Check (Phase 1)', () => {
+  before(async () => {
+    const wabt = await import('wabt');
+    wabtModule = await (wabt.default as unknown as () => Promise<WabtModule>)();
+  });
+
+  it('propagates YIELD_SENTINEL when FFI returns it', async () => {
+    // WAT that:
+    // 1. Calls an FFI function
+    // 2. Checks if result == YIELD_SENTINEL
+    // 3. If yes, returns YIELD_SENTINEL
+    // 4. If no, returns the result
+    //
+    // Note: WASM i64 uses signed representation, so we use -2 (which is 0xFFFFFFFFFFFFFFFE)
+    const wat = `(module
+      (import "ffi" "test_yield" (func $test_yield (result i64)))
+
+      (func $main (result i64)
+        (local $__ffi_result i64)
+        call $test_yield
+        local.tee $__ffi_result
+        i64.const -2  ;; YIELD_SENTINEL = 0xFFFFFFFFFFFFFFFE = -2 signed
+        i64.eq
+        if
+          i64.const -2
+          return
+        end
+        local.get $__ffi_result
+      )
+
+      (export "main" (func $main))
+    )`;
+
+    // FFI handler that returns YIELD_SENTINEL
+    // Note: JS sees -2n from WASM even though we pass YIELD_SENTINEL
+    const imports: WebAssembly.Imports = {
+      ffi: {
+        test_yield: () => YIELD_SENTINEL,
+      },
+    };
+
+    const instance = await instantiateWatWithImports(wat, imports);
+    const main = instance.exports['main'] as () => bigint;
+    const result = main();
+
+    // Compare as unsigned to handle signed/unsigned mismatch
+    assert.strictEqual(asU64(result), YIELD_SENTINEL);
+  });
+
+  it('returns normal value when FFI does not yield', async () => {
+    const wat = `(module
+      (import "ffi" "test_normal" (func $test_normal (result i64)))
+
+      (func $main (result i64)
+        (local $__ffi_result i64)
+        call $test_normal
+        local.tee $__ffi_result
+        i64.const -2  ;; YIELD_SENTINEL
+        i64.eq
+        if
+          i64.const -2
+          return
+        end
+        local.get $__ffi_result
+      )
+
+      (export "main" (func $main))
+    )`;
+
+    // FFI handler that returns a normal value
+    const imports: WebAssembly.Imports = {
+      ffi: {
+        test_normal: () => 42n,
+      },
+    };
+
+    const instance = await instantiateWatWithImports(wat, imports);
+    const main = instance.exports['main'] as () => bigint;
+    const result = main();
+
+    // Should return the normal value, not YIELD_SENTINEL
+    assert.strictEqual(result, 42n);
+  });
+
+  it('propagates yield through nested calls', async () => {
+    // Tests that yield propagates up the call stack:
+    // main() -> wrapper() -> FFI returns YIELD_SENTINEL
+    // wrapper should return YIELD_SENTINEL
+    // main should return YIELD_SENTINEL
+    const wat = `(module
+      (import "ffi" "yielding_ffi" (func $yielding_ffi (result i64)))
+
+      (func $wrapper (result i64)
+        (local $__ffi_result i64)
+        call $yielding_ffi
+        local.tee $__ffi_result
+        i64.const -2  ;; YIELD_SENTINEL
+        i64.eq
+        if
+          i64.const -2
+          return
+        end
+        local.get $__ffi_result
+      )
+
+      (func $main (result i64)
+        (local $wrapper_result i64)
+        call $wrapper
+        local.tee $wrapper_result
+        i64.const -2  ;; YIELD_SENTINEL
+        i64.eq
+        if
+          i64.const -2
+          return
+        end
+        local.get $wrapper_result
+      )
+
+      (export "main" (func $main))
+    )`;
+
+    const imports: WebAssembly.Imports = {
+      ffi: {
+        yielding_ffi: () => YIELD_SENTINEL,
+      },
+    };
+
+    const instance = await instantiateWatWithImports(wat, imports);
+    const main = instance.exports['main'] as () => bigint;
+    const result = main();
+
+    // Yield should propagate through wrapper to main (compare as unsigned)
+    assert.strictEqual(asU64(result), YIELD_SENTINEL);
+  });
+
+  it('sync FFI (Debug.trace style) works correctly', async () => {
+    // Simulates Debug.trace which returns 0 (Unit)
+    const wat = `(module
+      (import "ffi" "Debug_trace" (func $Debug_trace (param i64 i64) (result i64)))
+
+      (func $main (param $msg i64) (result i64)
+        (local $__ffi_result i64)
+        local.get $msg
+        i64.const 0
+        call $Debug_trace
+        local.tee $__ffi_result
+        i64.const -2  ;; YIELD_SENTINEL
+        i64.eq
+        if
+          i64.const -2
+          return
+        end
+        local.get $__ffi_result
+      )
+
+      (export "main" (func $main))
+    )`;
+
+    let traceWasCalled = false;
+    const imports: WebAssembly.Imports = {
+      ffi: {
+        Debug_trace: (_text: bigint, _val: bigint) => {
+          traceWasCalled = true;
+          return 0n; // Unit
+        },
+      },
+    };
+
+    const instance = await instantiateWatWithImports(wat, imports);
+    const main = instance.exports['main'] as (msg: bigint) => bigint;
+    const result = main(123n);
+
+    assert.strictEqual(traceWasCalled, true, 'Debug_trace should be called');
+    assert.strictEqual(result, 0n, 'Should return Unit (0)');
   });
 });
 

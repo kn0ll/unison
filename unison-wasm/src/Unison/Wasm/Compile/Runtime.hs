@@ -123,9 +123,51 @@ asyncContPtrGlobal =
       globalInit = 0
     }
 
+-- | Async resuming flag
+-- 1 = we're entering a function via __resume, 0 = normal entry
+asyncResumingGlobal :: WatGlobal
+asyncResumingGlobal =
+  WatGlobal
+    { globalName = "__async_resuming",
+      globalType = I32,
+      globalMutable = True,
+      globalInit = 0
+    }
+
+-- | Async resume label
+-- Which yield point to jump to when resuming (index into br_table)
+asyncResumeLabelGlobal :: WatGlobal
+asyncResumeLabelGlobal =
+  WatGlobal
+    { globalName = "__async_resume_label",
+      globalType = I32,
+      globalMutable = True,
+      globalInit = 0
+    }
+
+-- | Async resume value
+-- The value passed to __resume, to be used as FFI result
+asyncResumeValueGlobal :: WatGlobal
+asyncResumeValueGlobal =
+  WatGlobal
+    { globalName = "__async_resume_value",
+      globalType = I64,
+      globalMutable = True,
+      globalInit = 0
+    }
+
 -- | All runtime globals
 runtimeGlobals :: [WatGlobal]
-runtimeGlobals = [heapPtrGlobal, kPtrGlobal, denvPtrGlobal, asyncContIdGlobal, asyncContPtrGlobal]
+runtimeGlobals =
+  [ heapPtrGlobal,
+    kPtrGlobal,
+    denvPtrGlobal,
+    asyncContIdGlobal,
+    asyncContPtrGlobal,
+    asyncResumingGlobal,
+    asyncResumeLabelGlobal,
+    asyncResumeValueGlobal
+  ]
 
 --------------------------------------------------------------------------------
 -- Bump Allocator
