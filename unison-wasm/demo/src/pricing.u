@@ -1,16 +1,5 @@
--- pricing.u
--- This file runs on BOTH server (native Unison) and browser (WASM)
---
--- The core pricing logic is shared between environments.
--- No duplication = no drift = no bugs.
-
--- Price breakdown record - all values in cents
 type PriceResult = { subtotal: Nat, discount: Nat, total: Nat }
 
--- Calculate full price breakdown
--- @param delayMicros Delay in microseconds (for async demo)
--- @param quantity Number of items
--- @returns PriceResult with subtotal, discount, and total
 calculatePrice : Nat -> Nat -> PriceResult
 calculatePrice delayMicros quantity =
   _ = Debug.trace "calculating price" ()
