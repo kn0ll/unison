@@ -18,6 +18,30 @@ declare const UnisonRuntime: new () => IUnisonRuntime;
 
 let runtime: IUnisonRuntime | null = null;
 
+/**
+ * Load the compiled WASM module using UnisonRuntime
+ */
+async function loadWasm(): Promise<void> {
+  runtime = new UnisonRuntime();
+
+  runtime.registerForeign('Debug_trace', (rt, textPtr: bigint, _valPtr: bigint): bigint => {
+    const text = rt.getText(Number(textPtr));
+    return 0n;
+  });
+
+  runtime.registerForeign('Debug_watch', (rt, textPtr: bigint): bigint => {
+    const text = rt.getText(Number(textPtr));
+    return textPtr;
+  });
+
+  runtime.registerAsyncForeign('IO.delay.impl.v3', async (_rt, microseconds: bigint): Promise<bigint> => {
+    await new Promise(resolve => setTimeout(resolve, Number(microseconds) / 1000));
+    return 0n;
+  });
+
+  await runtime.loadWasmUrl('./dist/pricing.wasm');
+}
+
 // DOM Elements
 let qtySlider: HTMLInputElement;
 let delayInput: HTMLInputElement;
@@ -78,31 +102,6 @@ async function init(): Promise<void> {
   } catch (error) {
     showError(error instanceof Error ? error.message : String(error));
   }
-}
-
-/**
- * Load the compiled WASM module using UnisonRuntime
- */
-async function loadWasm(): Promise<void> {
-  runtime = new UnisonRuntime();
-
-  runtime.registerForeign('Debug_trace', (rt, textPtr: bigint, _valPtr: bigint): bigint => {
-    const text = rt.getText(Number(textPtr));
-    return 0n;
-  });
-
-  runtime.registerForeign('Debug_watch', (rt, textPtr: bigint): bigint => {
-    const text = rt.getText(Number(textPtr));
-    return textPtr;
-  });
-
-  runtime.registerAsyncForeign('IO.delay.impl.v3', async (_rt, microseconds: bigint): Promise<bigint> => {
-    const ms = Number(microseconds) / 1000;
-    await new Promise(resolve => setTimeout(resolve, ms));
-    return 0n;
-  });
-
-  await runtime.loadWasmUrl('./dist/pricing.wasm');
 }
 
 /**
