@@ -84,35 +84,25 @@ async function init(): Promise<void> {
  * Load the compiled WASM module using UnisonRuntime
  */
 async function loadWasm(): Promise<void> {
-  // Create UnisonRuntime instance
   runtime = new UnisonRuntime();
 
-  // Register sync FFI handlers for Debug.trace/watch
   runtime.registerForeign('Debug_trace', (rt, textPtr: bigint, _valPtr: bigint): bigint => {
     const text = rt.getText(Number(textPtr));
-    console.log(`[trace] ${text}`);
     return 0n;
   });
 
   runtime.registerForeign('Debug_watch', (rt, textPtr: bigint): bigint => {
     const text = rt.getText(Number(textPtr));
-    console.log(`[watch] ${text}`);
     return textPtr;
   });
 
-  // IO.delay.impl.v3 - async handler with real setTimeout
   runtime.registerAsyncForeign('IO.delay.impl.v3', async (_rt, microseconds: bigint): Promise<bigint> => {
     const ms = Number(microseconds) / 1000;
-    console.log(`[IO.delay] waiting ${ms}ms...`);
     await new Promise(resolve => setTimeout(resolve, ms));
-    console.log(`[IO.delay] done`);
     return 0n;
   });
 
-  // Load the WASM module from URL (browser convenience method)
   await runtime.loadWasmUrl('./dist/pricing.wasm');
-
-  console.log('✅ WASM module loaded');
 }
 
 /**
