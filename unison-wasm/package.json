@@ -1,0 +1,7 @@
+{
+  "name": "unison-wasm",
+  "private": true,
+  "scripts": {
+    "clean": "rm -rf node_modules js/node_modules demo/node_modules"
+  }
+}

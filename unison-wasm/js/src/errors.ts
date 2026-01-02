@@ -9,9 +9,9 @@
  * Continuations are linear (exactly-once).
  */
 export class ContinuationConsumedError extends Error {
-  readonly contId: number;
+  readonly contId: bigint;
 
-  constructor(contId: number) {
+  constructor(contId: bigint) {
     super(
       `Continuation ${contId} has already been consumed (exactly-once violation)`
     );
@@ -37,14 +37,12 @@ export class NestedAsyncError extends Error {
  * Thrown when attempting to resume with an invalid continuation ID.
  */
 export class InvalidContinuationError extends Error {
-  readonly expected: number;
-  readonly actual: number;
+  readonly contId: bigint;
 
-  constructor(expected: number, actual: number) {
-    super(`Expected continuation ${expected}, got ${actual}`);
+  constructor(contId: bigint) {
+    super(`Expected continuation ${contId}`);
     this.name = 'InvalidContinuationError';
-    this.expected = expected;
-    this.actual = actual;
+    this.contId = contId;
   }
 }
 
@@ -140,5 +138,16 @@ export class OutOfMemoryError extends Error {
     this.name = 'OutOfMemoryError';
     this.requested = requested;
     this.available = available;
+  }
+}
+
+/**
+ * Error thrown when attempting to resume when not in a yielded state.
+ */
+export class InvalidResumeError extends Error {
+  public override readonly name = 'InvalidResumeError';
+
+  constructor(message: string) {
+    super(message);
   }
 }

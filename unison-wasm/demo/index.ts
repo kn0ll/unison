@@ -11,12 +11,11 @@
  */
 
 /// <reference path="./dist/bundle.d.ts" />
-import type { UnisonRuntime as IUnisonRuntime, FunctionSignatures } from '@unison/wasm-runtime';
 
-// UnisonRuntime constructor is available globally (loaded via script tag)
-declare const UnisonRuntime: new () => IUnisonRuntime;
+import { UnisonRuntime } from '@unison/wasm-runtime';
 
-let runtime: IUnisonRuntime | null = null;
+
+let runtime: UnisonRuntime | null = null;
 
 /**
  * Load the compiled WASM module using UnisonRuntime

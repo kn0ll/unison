@@ -33,14 +33,16 @@ import {
   type ObjTag,
 } from './abi-constants.js';
 
-import { ArityError } from './errors.js';
+import {
+  ArityError,
+  NestedAsyncError,
+  InvalidContinuationError,
+  InvalidResumeError,
+} from './errors.js';
 
 import {
   ContinuationHandle,
   AsyncState,
-  NestedAsyncError,
-  InvalidContinuationError,
-  InvalidResumeError,
 } from './continuation.js';
 
 // =============================================================================

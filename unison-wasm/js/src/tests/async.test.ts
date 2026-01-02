@@ -9,12 +9,15 @@ import assert from 'node:assert/strict';
 
 import {
   // ContinuationHandle is used indirectly via runtime methods
+  AsyncState,
+} from '../continuation.js';
+
+import {
   ContinuationConsumedError,
   NestedAsyncError,
   InvalidContinuationError,
   InvalidResumeError,
-  AsyncState,
-} from '../continuation.js';
+} from '../errors.js';
 
 import {
   UnisonRuntime,
@@ -1898,7 +1901,8 @@ describe('Phase 5: Error Handling', () => {
   // Test that double-resume throws ContinuationConsumedError
   it('double-resume throws ContinuationConsumedError', async () => {
     // ContinuationHandle enforces exactly-once resumption
-    const { ContinuationHandle, ContinuationConsumedError } = await import('../continuation.js');
+    const { ContinuationHandle } = await import('../continuation.js');
+    const { ContinuationConsumedError } = await import('../errors.js');
 
     // Create a mock runtime with resumeInternal
     let resumeCount = 0;
@@ -1936,7 +1940,8 @@ describe('Phase 5: Error Handling', () => {
 
   // Test that resumeWithError also enforces exactly-once
   it('resumeWithError after resume throws ContinuationConsumedError', async () => {
-    const { ContinuationHandle, ContinuationConsumedError } = await import('../continuation.js');
+    const { ContinuationHandle } = await import('../continuation.js');
+    const { ContinuationConsumedError } = await import('../errors.js');
 
     let resumeCount = 0;
     const mockRuntime = {

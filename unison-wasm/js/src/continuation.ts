@@ -8,57 +8,8 @@
  * @module continuation
  */
 
+import { ContinuationConsumedError } from './errors.js';
 import type { UnisonRuntime } from './runtime.js';
-
-/**
- * Error thrown when attempting to resume a continuation that was already consumed.
- * This enforces the exactly-once semantics required by the Unison runtime.
- */
-export class ContinuationConsumedError extends Error {
-  public override readonly name = 'ContinuationConsumedError';
-
-  constructor(public readonly contId: bigint) {
-    super(`Continuation ${contId} already consumed (exactly-once violation)`);
-  }
-}
-
-/**
- * Error thrown when attempting to start a new async operation while one is in-flight.
- * This is an MVP constraint that will be lifted in future versions.
- */
-export class NestedAsyncError extends Error {
-  public override readonly name = 'NestedAsyncError';
-
-  constructor() {
-    super(
-      'Nested async operations not supported in MVP. ' +
-        'Cannot start new async while one is in-flight. ' +
-        'This limitation will be lifted in a future version.'
-    );
-  }
-}
-
-/**
- * Error thrown when attempting to resume with an invalid continuation ID.
- */
-export class InvalidContinuationError extends Error {
-  public override readonly name = 'InvalidContinuationError';
-
-  constructor(public readonly contId: bigint) {
-    super(`Invalid continuation ID: ${contId}`);
-  }
-}
-
-/**
- * Error thrown when attempting to resume when not in a yielded state.
- */
-export class InvalidResumeError extends Error {
-  public override readonly name = 'InvalidResumeError';
-
-  constructor(message: string) {
-    super(message);
-  }
-}
 
 /**
  * Handle to a suspended async continuation.
